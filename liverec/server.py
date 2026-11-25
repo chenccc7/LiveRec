@@ -127,7 +127,7 @@ async def _cookie_audit() -> None:
             log("WARN", f"Cookie 启动校验 · {label}：检测失败 {type(exc).__name__}: {exc}")
             continue
         message = res.get("message") or ""
-        if res.get("state") == "login":
+        if res.get("state") == "login" or (res.get("state") == "likely" and platform in ("huya", "douyu")):
             log("SUCCESS", f"Cookie 启动校验 · {label}：{message}")
         elif res.get("ok") is False:
             log("WARN", f"Cookie 启动校验 · {label}：{message}")
@@ -448,7 +448,7 @@ async def api_cookie_check(body: CookieCheckBody):
         raw = cfg.cookie(platform)
     result = await cookie_check.check_cookie(platform, raw, cfg.proxy_addr() if cfg.proxy_enabled() else "")
     label = result.get("label") or platform
-    if result.get("state") == "login":
+    if result.get("state") == "login" or (result.get("state") == "likely" and platform in ("huya", "douyu")):
         log("SUCCESS", f"{label} Cookie 检测：{result.get('message')}")
     elif result.get("ok") is False:
         log("WARN", f"{label} Cookie 检测：{result.get('message')}")

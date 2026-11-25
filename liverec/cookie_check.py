@@ -134,8 +134,8 @@ async def _check_douyu(cli: httpx.AsyncClient, parsed: dict[str, str]) -> dict[s
                            f"登录令牌已过期（有效至 {when}）",
                            "重新登录 douyu.com 后把 Cookie 整段复制过来。")
         days = max(1, int(left // 86400))
-        return _result("douyu", "likely", None,
-                       f"检测到登录令牌：uid {uid}，有效至 {when}（约 {days} 天）",
+        return _result("douyu", "login", True,
+                       f"登录有效：uid {uid}（令牌有效至 {when}，约 {days} 天）",
                        "斗鱼没有公开的登录态查询接口，这里校验的是登录令牌本身："
                        "能解出 uid 且未过期。若录制日志出现 403/鉴权失败，再重新登录一次。")
 
