@@ -24,6 +24,11 @@
   「虎牙录制已暂时下线：平台流地址一次性失效、CDN 频繁掐断，暂时录不稳」。`manager.add()` 对虎牙链接直接报错不建卡；`manager.load()`
   把已存在的虎牙房间置为待机（`enabled=False`、`unattended=False`），`resume_unattended()` 跳过并记一条「N 个房间所属平台已下线」；
   添加弹窗与设置页的提示文案同步改成「抖音 / B站 / 斗鱼」。实现仍完整保留在 `liverec/huya.py`，恢复时清空 `DISABLED_PLATFORMS` 即可。
+- **设置里自定义 ffmpeg 路径**：`config.ini` 新增 `ffmpeg路径(不填则用内置)`（`K_FFMPEG`），`Config.ffmpeg_path()` 会调
+  `paths.set_ffmpeg_path()` —— 传进来的文件不存在时**不采用**并回落到内置/PATH，避免一次手滑让全部录制崩掉。`paths.ffmpeg_exe()`
+  现在优先返回这个 override；`recorder` / `concat` / `huya` 都是通过它取路径，所以保存设置后新开始的录制立刻用新 ffmpeg（已运行的不重启）。
+  `POST /api/settings` 收到不存在的路径直接 400（提示「找不到这个 ffmpeg：…」），并打一行「ffmpeg 路径已切换 / 已改回内置」；
+  `_apply_startup()` 启动时先应用一次，所以日志第一行 `已启动 · ffmpeg=…` 就是真正生效的那个。设置页新增该输入框 + 「当前生效：…」提示。
 
 ## v0.2.0（2026-11-25 20:30，未打 tag，等确认）
 

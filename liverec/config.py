@@ -23,6 +23,8 @@ K_QUALITY = "原画|超清|高清|标清|流畅"
 K_FORMAT = "视频保存格式ts|mkv|flv|mp4|mp3音频|m4a音频"
 # 弹幕明细（jsonl）落盘位置；留空 = 跟着录像目录走（<录像目录>/danmaku/）
 K_DANMAKU_ROOT = "弹幕保存路径(不填则跟随视频目录)"
+# 自定义 ffmpeg.exe 路径；留空 = 用内置（bin/ffmpeg.exe）或 PATH 里的那个
+K_FFMPEG = "ffmpeg路径(不填则用内置)"
 
 QUALITY_CODES = {
     "原画": "OD",
@@ -148,6 +150,15 @@ class Config:
         except OSError:
             return ""
 
+    def ffmpeg_path(self) -> str:
+        """设置页里自定义的 ffmpeg.exe；返回真正生效的路径（无效/为空则回落到内置）。"""
+        raw = self.raw(SEC_REC, K_FFMPEG, "").strip().strip('"').strip("'")
+        return paths.set_ffmpeg_path(raw)
+
+    def apply_ffmpeg_path(self) -> str:
+        """把配置里的 ffmpeg 路径应用到 paths（启动时、保存设置后各调一次）。"""
+        return self.ffmpeg_path()
+
     def proxy_enabled(self) -> bool:
         """代理开关：要求「是」且代理地址非空，避免空地址被当成开启。"""
         if not self.get_bool(SEC_REC, "是否使用代理ip(是/否)", False):
@@ -188,6 +199,7 @@ class Config:
             "proxyAddr": self.proxy_addr(),
             "cookies": {p: self.cookie(p) for p in COOKIE_KEYS},
             "ffmpeg": paths.ffmpeg_exe(),
+            "ffmpegPath": self.raw(SEC_REC, K_FFMPEG, "").strip(),
         }
 
     def apply_dict(self, data: dict[str, Any]) -> None:
@@ -199,6 +211,9 @@ class Config:
             self.set(SEC_REC, "直播保存路径(不填则默认)", str(data["saveRoot"] or ""))
         if "danmakuRoot" in data:
             self.set(SEC_REC, K_DANMAKU_ROOT, str(data["danmakuRoot"] or ""))
+        if "ffmpegPath" in data:
+            self.set(SEC_REC, K_FFMPEG, str(data["ffmpegPath"] or ""))
+            self.apply_ffmpeg_path()
         if "splitEnabled" in data:
             self.set(SEC_REC, "分段录制是否开启", "是" if data["splitEnabled"] else "否")
         if "splitSeconds" in data:

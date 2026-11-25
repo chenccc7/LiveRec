@@ -73,7 +73,36 @@ def seed_config() -> None:
             shutil.copyfile(os.path.join(src, name), target)
 
 
+_FFMPEG_OVERRIDE: str = ""
+
+
+def set_ffmpeg_path(path: str) -> str:
+    """设置页里自定义的 ffmpeg 路径（空串 = 用内置/自动探测）。
+
+    返回真正生效的路径；传进来的文件不存在时不采用（返回当前仍然生效的那个），
+    免得用户手滑填错导致所有录制直接崩掉。
+    """
+    global _FFMPEG_OVERRIDE
+    candidate = (path or "").strip().strip('"').strip("'")
+    if not candidate:
+        _FFMPEG_OVERRIDE = ""
+        return ffmpeg_exe()
+    if os.path.isfile(candidate):
+        _FFMPEG_OVERRIDE = candidate
+    return ffmpeg_exe()
+
+
+def ffmpeg_path_override() -> str:
+    return _FFMPEG_OVERRIDE
+
+
+def ffmpeg_ok(path: str | None = None) -> bool:
+    return bool(path) and os.path.isfile(path or "")
+
+
 def ffmpeg_exe() -> str:
+    if _FFMPEG_OVERRIDE and os.path.isfile(_FFMPEG_OVERRIDE):
+        return _FFMPEG_OVERRIDE
     for cand in (
         os.path.join(bundle_root(), "bin", "ffmpeg.exe"),
         os.path.join(app_root(), "bin", "ffmpeg.exe"),

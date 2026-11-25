@@ -72,6 +72,7 @@ class SettingsBody(BaseModel):
     saveFormat: str | None = None
     saveRoot: str | None = None
     danmakuRoot: str | None = None
+    ffmpegPath: str | None = None
     splitEnabled: bool | None = None
     splitSeconds: int | None = None
     loopInterval: int | None = None
@@ -137,6 +138,11 @@ async def _cookie_audit() -> None:
 async def _apply_startup() -> None:
     hub.loop = asyncio.get_running_loop()
     manager.subscribe(_on_manager_event)
+    # 设置里自定义的 ffmpeg 路径要先应用，后面的启动自检/录制才会用它
+    try:
+        cfg.apply_ffmpeg_path()
+    except Exception as exc:  # 配置里那条路径写坏了也不能拖垮启动
+        log("WARN", f"自定义 ffmpeg 路径不可用，改用内置：{exc}")
     log("INFO", f"LiveRec 控制台 v{APP_VERSION} 已启动 · ffmpeg={paths.ffmpeg_exe()}")
     try:
         await manager.resume_unattended()
@@ -403,6 +409,11 @@ async def api_get_settings():
 async def api_set_settings(body: SettingsBody):
     data = body.model_dump(exclude_none=True)
     cookies = data.pop("cookies", None)
+    # ffmpeg 路径要先校验：填了但文件不存在时直接 400，别让用户以为换成功了
+    wanted_ffmpeg = (data.get("ffmpegPath") or "").strip().strip('"').strip("'")
+    if wanted_ffmpeg and not os.path.isfile(wanted_ffmpeg):
+        raise HTTPException(status_code=400,
+                            detail=f"找不到这个 ffmpeg：{wanted_ffmpeg}（请填 ffmpeg.exe 的完整路径）")
     # 打码值原样回传时不覆盖
     cfg.apply_dict(data)
     if cookies:
@@ -410,6 +421,10 @@ async def api_set_settings(body: SettingsBody):
         if clean:
             cfg.apply_dict({"cookies": clean})
     resolver.set_concurrency(cfg.concurrent())
+    if wanted_ffmpeg:
+        log("INFO", f"ffmpeg 路径已切换：{paths.ffmpeg_exe()}")
+    elif "ffmpegPath" in data:
+        log("INFO", f"ffmpeg 已改回内置：{paths.ffmpeg_exe()}")
     log("INFO", "全局设置已保存")
     return {"ok": True, "settings": cfg.to_dict()}
 
