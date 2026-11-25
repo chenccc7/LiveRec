@@ -520,7 +520,7 @@ def _resolve_douyin(url: str, quality_code: str, cookie: str, proxy: str) -> dic
 
 
 def _huya_room_id(url: str, proxy: str = "") -> str:
-    """虎牙房间号：数字直接用；短名（www.huya.com/<短名>）从移动页里取真实房间号。
+    """虎牙房间号：数字直接用；短名（www.huya.com/dank1ng）从移动页里取 lChannelId。
 
     cache.php 那套接口只认数字房间号，所以短名必须先换一次。
     """
@@ -662,11 +662,24 @@ def _huya_fresh_line(room_url: str, target_url: str, cookie: str = "", proxy: st
 
     try:
         room = _huya_room_id(room_url, proxy)
-        data = _huya_mp_data_cached(room, cookie, proxy, ttl=8.0)
+        # 2.5 秒的短缓存：HLS 中转刷新播放列表时会连续取几次，太频繁会被接口限流，
+        # 但签名 20 秒左右就过期，所以缓存不能超过一小会儿。
+        data = _huya_mp_data_cached(room, cookie, proxy, ttl=2.5)
     except Exception:  # noqa: BLE001
         return ""
     host = urllib.parse.urlsplit(target_url).netloc
+    want_ratio = ""
+    match_ratio = re.search(r"[?&]ratio=(\d+)", target_url)
+    if match_ratio:
+        want_ratio = match_ratio.group(1)
     lines = _huya_mp_lines(data, 0)
+    # 先按「同 CDN + 同 ratio（同一档位）」找，找不到再退回同 CDN，最后退回第一条
+    for line in lines:
+        if urllib.parse.urlsplit(line).netloc != host:
+            continue
+        got = re.search(r"[?&]ratio=(\d+)", line)
+        if want_ratio and got and got.group(1) == want_ratio:
+            return line
     for line in lines:
         if urllib.parse.urlsplit(line).netloc == host:
             return line
@@ -758,6 +771,17 @@ def _huya_mp_lines(data: dict[str, Any], target_bitrate: int = 0) -> list[str]:
         signed = _huya_resign(raw, to_flv=True) or raw
         if signed not in flv_urls:
             flv_urls.append(signed)
+    # 实测同一时刻有的 CDN 403、有的 200，hs 系最稳、al 最差，先按 CDN 排一层再按码率
+    def _cdn_rank(u: str) -> int:
+        host = u.split("/")[2] if "//" in u else u
+        if host.startswith("hs."):
+            return 0
+        if host.startswith("tx."):
+            return 1
+        return 2
+
+    hls_urls.sort(key=_cdn_rank)
+    flv_urls.sort(key=_cdn_rank)
     return hls_urls + flv_urls
 
 

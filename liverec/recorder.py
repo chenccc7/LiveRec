@@ -92,6 +92,11 @@ class RecordTask:
         self.anchor = ""
         self.title = ""
         self.platform = resolver.detect_platform(url)
+        # 虎牙的流签名只有 20 秒左右有效期，CDN 会主动掐断；等 60 秒再重试期间卡片看着像「没数据」。
+        # 这里给虎牙用更短的判停阈值 + 立即重连，表现成「分段落盘、总在写」。
+        self._stall_seconds = 15.0 if self.platform == "huya" else STALL_SECONDS
+        # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
+        self._huya_streak = 0
         self.error = ""
         self.started_at = 0.0
         self.elapsed = 0.0
@@ -184,6 +189,8 @@ class RecordTask:
         self._stalled = False
         self._quality_checked = False
         self._last_growth = time.time()
+        self._base_bytes = 0
+        self._huya_streak = 0
         self.size = 0
         self.size_text = "0 B"
         self.bitrate = ""
@@ -202,7 +209,7 @@ class RecordTask:
         self.session_id = ""
         self.status = "waiting"
         self.push(force=True)
-        self._loop_task = asyncio.create_task(self._run())
+        self._loop_task = asyncio.create_task(self._guarded_run())
 
     async def stop(self, status: str = "stopped") -> None:
         self._stop.set()
@@ -237,6 +244,30 @@ class RecordTask:
             pass
 
     # ---------- 主循环 ----------
+    async def _guarded_run(self) -> None:
+        """保护壳：录制循环里出任何意外异常都不要让房间永久卡在「录制中」。
+
+        `_run()` 正常返回只发生在停止/取消时；异常时记录日志、把状态摆回
+        「等待开播」并隔一会儿重来，避免卡片显示录制中但实际早已没有输出。
+        """
+        while not self._stop.is_set():
+            try:
+                await self._run()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log(
+                    "ERROR",
+                    f"{self.anchor or self.url} 录制循环异常：{type(exc).__name__}: {exc}",
+                )
+                self.status = "waiting"
+                self.error = ""
+                self.note = ""
+                self.next_check_at = time.time() + 15
+                self.push(force=True)
+                await self._wait(15)
+
     async def _run(self) -> None:
         cfg = self.cfg
         while not self._stop.is_set():
@@ -319,6 +350,29 @@ class RecordTask:
             if self._stop.is_set():
                 return
             if self._stalled:
+                if self.platform == "huya" and self.size > 0:
+                    # 虎牙：签名到期被掐断是常态，立刻换新签名续录，卡片保持「录制中」，
+                    # 每段单独落一个文件（时间戳不同，不会覆盖）；已录字节要接着累计，
+                    # 否则卡片上的体积会突然掉回 0。
+                    segment_bytes = self.size - self._base_bytes
+                    if segment_bytes >= 1_000_000:
+                        # 这一段真的录到了东西，说明不是被限流，连续失败计数清零
+                        self._huya_streak = 0
+                    self._huya_streak += 1
+                    if self._huya_streak <= 6:
+                        self._base_bytes = self.size
+                        self._stalled = False
+                        self.status = "recording"
+                        self.error = ""
+                        self.note = "虎牙签名到期自动续录（每段单独成文件）"
+                        self.push(force=True)
+                        # 连续几次拿不到数据时退避，否则会被 CDN 当成刷量，越试越 403
+                        await self._wait(min(1.0 + self._huya_streak, 5.0))
+                        continue
+                    log("WARN",
+                        f"{self.anchor or self.url} 连续 {self._huya_streak} 段没有新数据"
+                        "（可能被 CDN 限流），暂停重试，回到等待开播")
+                    self._huya_streak = 0
                 # 无数据看门狗：不报错，回到等待开播；断流大多是线路被掐，
                 # 先按短间隔重试（15 秒），让换线/重连尽快生效。
                 interval = min(15.0, float(cfg.check_interval()))
@@ -385,8 +439,8 @@ class RecordTask:
         self.started_at = time.time()
         self._live_since = time.time()
         self.elapsed = 0.0
-        self.size = 0
-        self.size_text = "0 B"
+        self.size = self._base_bytes
+        self.size_text = _fmt_size(self.size)
         self.segments = 0
         self.current_file = os.path.basename(out_pattern.replace("%03d", "000"))
         self.status = "recording"
@@ -448,9 +502,9 @@ class RecordTask:
                             self._proc.terminate()
                     break
                 # 已经出过数据，但连续一分钟不再增长：判流挂住，停止本次录制回到等待开播
-                if self.size > 0 and time.time() - self._last_growth > STALL_SECONDS:
+                if self.size > 0 and time.time() - self._last_growth > self._stall_seconds:
                     self._stalled = True
-                    log("WARN", f"{anchor} 连续 {int(STALL_SECONDS)} 秒没有新数据，停止录制，回到等待开播")
+                    log("WARN", f"{anchor} 连续 {int(self._stall_seconds)} 秒没有新数据，停止录制，回到等待开播")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -484,7 +538,7 @@ class RecordTask:
         if self._stop.is_set():
             return
         if self._stalled:
-            self.note = f"连续 {int(STALL_SECONDS)} 秒没有新数据，已停止录制，等待下次开播"
+            self.note = f"连续 {int(self._stall_seconds)} 秒没有新数据，已停止录制，等待下次开播"
             log("INFO", f"{anchor} 本次录制结束（无数据看门狗触发，{_fmt_size(self.size)}）")
         elif not healthy:
             tail = " | ".join(self._last_error_lines[-3:]) or "所有线路均无法拉流"
@@ -618,7 +672,7 @@ class RecordTask:
                 return
             if new_size != self.size:
                 self._last_growth = time.time()
-            self.size = new_size
+            self.size = self._base_bytes + new_size
             self.size_text = _fmt_size(self.size)
         elif key == "bitrate":
             if val and val.upper() != "N/A":
@@ -654,10 +708,10 @@ class RecordTask:
         except OSError:
             return
         if total:
-            if total != self.size:
+            if self._base_bytes + total != self.size:
                 self._last_growth = time.time()
-            self.size = total
-            self.size_text = _fmt_size(total)
+            self.size = self._base_bytes + total
+            self.size_text = _fmt_size(self.size)
         self.segments = count
         if latest:
             self.current_file = latest

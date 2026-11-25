@@ -36,6 +36,7 @@ class _State:
         # 有些平台（虎牙）每次请求都要现算签名，播放列表每刷新一次就得重签一次
         self.signer = signer
         self.segments: Dict[str, str] = {}
+        self.last_text = ""
         self.lock = threading.Lock()
 
     def register(self, absolute: str) -> str:
@@ -110,27 +111,76 @@ class _Handler(BaseHTTPRequestHandler):
             self._fail(404, b"not found")
 
     def _playlist(self, state: _State) -> None:
+        # 虎牙这类 CDN 的签名基本是「一次一签」，同一地址重放就会 403，
+        # 所以每次刷新都重新签名，并且失败时再试两次（每次都是新的签名）。
+        resp = None
         target = state.url
-        if state.signer is not None:
+        for _attempt in range(3):
+            candidate = state.url
+            if state.signer is not None:
+                try:
+                    signed = state.signer(candidate)
+                    if signed:
+                        candidate = signed
+                except Exception:  # noqa: BLE001 签名失败就沿用原地址
+                    pass
             try:
-                signed = state.signer(target)
-                if signed:
-                    target = signed
-            except Exception:  # noqa: BLE001 签名失败就沿用原地址
-                pass
-        try:
-            resp = requests.get(target, headers=state.headers, timeout=state.timeout)
-        except Exception as exc:  # noqa: BLE001
-            self._fail(502, f"upstream error: {exc}".encode())
+                resp = requests.get(candidate, headers=state.headers, timeout=state.timeout)
+            except Exception:  # noqa: BLE001
+                resp = None
+                continue
+            target = candidate
+            if resp.status_code == 200:
+                break
+        if resp is None:
+            self._fail(502, b"upstream error")
             return
         if resp.status_code != 200:
+            # 拿不到新列表时，把上一次成功的内容再发一遍，让 ffmpeg 继续等新分片，
+            # 比直接 502 让整条记录断掉要好。
+            last = getattr(state, "last_text", "")
+            if last:
+                self._send_playlist(state, last)
+                return
             self._fail(502, f"upstream {resp.status_code}".encode())
             return
+        text = resp.text or ""
+        # 主播放列表（master）指向的子列表常是「一次性」地址，透传必 403；
+        # 这里自己跟一跳，把真正带分片的 media 列表取回来。
+        for _ in range(2):
+            if "#EXT-X-STREAM-INF" not in text:
+                break
+            child = next((ln.strip() for ln in text.splitlines()
+                          if ln.strip() and not ln.startswith("#")), "")
+            if not child:
+                break
+            child = child if child.startswith("http") else urllib.parse.urljoin(target, child)
+            if state.signer is not None:
+                try:
+                    child = state.signer(child) or child
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                sub = requests.get(child, headers=state.headers, timeout=state.timeout)
+            except Exception as exc:  # noqa: BLE001
+                self._fail(502, f"child error: {exc}".encode())
+                return
+            if sub.status_code != 200:
+                self._fail(502, f"child {sub.status_code}".encode())
+                return
+            target, text = child, (sub.text or "")
         # 用当次真正请求的地址来拼绝对地址（签名参数跟着变）
         view = _State(target, state.headers, state.timeout)
         view.segments = state.segments
         view.lock = state.lock
-        body = _rewrite(view, resp.text).encode("utf-8")
+        state.last_text = text
+        self._send_playlist(state, text, target)
+
+    def _send_playlist(self, state: _State, text: str, base_url: str = "") -> None:
+        view = _State(base_url or state.url, state.headers, state.timeout)
+        view.segments = state.segments
+        view.lock = state.lock
+        body = _rewrite(view, text).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/vnd.apple.mpegurl")
         self.send_header("Content-Length", str(len(body)))
@@ -139,6 +189,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _relay(self, state: _State, target: str) -> None:
+        # 分片地址里又出现 m3u8（主播放列表 → 子列表）时，仍然走「重新取 + 改写」，
+        # 不然子列表会带着上一跳的签名去请求，几秒后必 403。
+        if urllib.parse.urlsplit(target).path.lower().endswith(".m3u8"):
+            view = _State(target, state.headers, state.timeout, signer=state.signer)
+            view.segments = state.segments
+            view.lock = state.lock
+            self._playlist(view)
+            return
         try:
             resp = requests.get(target, headers=state.headers, timeout=state.timeout, stream=True)
         except Exception as exc:  # noqa: BLE001
