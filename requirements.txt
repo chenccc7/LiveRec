@@ -14,3 +14,4 @@ PyExecJS ; sys_platform == "win32"
 pyinstaller
 pillow            # 只用来生成 bin/liverec.ico，运行期不需要
 grpcio-tools      # 只在改 douyin.proto 后重新生成 douyin_pb2.py 时需要
+yt-dlp
