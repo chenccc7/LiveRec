@@ -21,6 +21,7 @@ https://live.douyin.com/531854687617
 https://live.douyin.com/share/531854687617
 https://www.douyin.com/follow/live/531854687617?anchor_id=61608272917
 https://www.douyin.com/root/live/531854687617
+https://live.douyin.com/?live_web_rid=57894179290&page_type=live_main_page   # 直播频道页，房间号在 query 里
 https://v.douyin.com/xxxxxx/            # 短链，会先跟一次跳转再取
 ```
 

@@ -99,6 +99,16 @@ def _text(value: Any) -> str:
     return str(value)
 
 
+def _web_rid(url: str) -> str:
+    """从各种抖音直播链接里取 web_rid（与 resolver 保持同一套规则）。"""
+    m = re.search(r"live\.douyin\.com/(?:share/)?(\d+)", url or "")
+    if not m:
+        m = re.search(r"douyin\.com/(?:[^?#]*?/)?live/(\d{5,})", url or "")
+    if not m:
+        m = re.search(r"[?&](?:live_web_rid|web_rid|room_id)=(\d{5,})", url or "")
+    return m.group(1) if m else ""
+
+
 class DouyinDanmaku:
     supported = True
     reason = ""
@@ -106,10 +116,20 @@ class DouyinDanmaku:
     def __init__(self, url: str, cookie: str = ""):
         self.url = url
         self.cookie = cookie
-        m = re.search(r"live\.douyin\.com/(?:share/)?(\d+)", url)
-        self.web_rid = m.group(1) if m else ""
+        self.web_rid = _web_rid(url)
         self.room_id = ""
         self.ttwid = ""
+
+    def _cookie_header(self) -> str:
+        """握手必须带 cookie：只有 ttwid 也会被放行，完全不带会被回 200 拒掉。
+
+        用户填了抖音 cookie 就更稳（登录态下也不会缺 ttwid，缺了这里补上）。
+        """
+        header = (self.cookie or "").strip().rstrip(";")
+        has_ttwid = "ttwid=" in header
+        if self.ttwid and not has_ttwid:
+            header = f"{header}; ttwid={self.ttwid}" if header else f"ttwid={self.ttwid}"
+        return header
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -117,12 +137,13 @@ class DouyinDanmaku:
             "Referer": f"https://live.douyin.com/{self.web_rid or ''}",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        if self.cookie:
-            headers["Cookie"] = self.cookie
+        cookie = self._cookie_header()
+        if cookie:
+            headers["Cookie"] = cookie
         return headers
 
     async def _prepare(self) -> None:
-        """从直播间网页拿 room_id 与 ttwid。"""
+        """从直播间网页拿 room_id、并确保拿到 ttwid（弹幕握手要用）。"""
         if not self.web_rid:
             raise RuntimeError("抖音直播间地址里没有房间号")
         timeout = httpx.Timeout(20.0, connect=10.0)
@@ -131,6 +152,13 @@ class DouyinDanmaku:
             page = await cli.get(f"https://live.douyin.com/{self.web_rid}")
             text = page.text or ""
             self.ttwid = cli.cookies.get("ttwid") or page.cookies.get("ttwid") or ""
+            if not self.ttwid:
+                # 直播间页面偶尔只下发 roomId 不给 ttwid，去首页补一次
+                try:
+                    home = await cli.get("https://live.douyin.com/")
+                    self.ttwid = cli.cookies.get("ttwid") or home.cookies.get("ttwid") or ""
+                except Exception:  # noqa: BLE001
+                    self.ttwid = ""
             for pattern in (r'roomId\\":\\"(\d+)\\"', r'"roomId":"(\d+)"', r"roomId\\\":\\\"(\d+)"):
                 m = re.search(pattern, text)
                 if m:
@@ -138,6 +166,8 @@ class DouyinDanmaku:
                     break
         if not self.room_id:
             raise RuntimeError("抖音弹幕：未能从直播间网页解析出 room_id")
+        if not self.ttwid:
+            raise RuntimeError("抖音弹幕：没拿到 ttwid（弹幕服务会拒绝握手），请稍后重试或检查网络")
 
     def _wss_url(self) -> str:
         wss = WSS_TPL.format(room_id=self.room_id, user_unique_id=USER_UNIQUE_ID)
@@ -222,7 +252,8 @@ class DouyinDanmaku:
 
     async def _consume(self, emit: Callable[[dict], None]) -> None:
         url = self._wss_url()
-        headers = {"User-Agent": UA, "Cookie": f"ttwid={self.ttwid}"} if self.ttwid else {"User-Agent": UA}
+        # 握手必须带 cookie（至少 ttwid），否则服务端直接回 HTTP 200 拒绝
+        headers = self._headers()
         self._pending_ack = b""
         async with websockets.connect(url, additional_headers=headers, max_size=2 ** 23,
                                       ping_interval=None, open_timeout=15) as ws:

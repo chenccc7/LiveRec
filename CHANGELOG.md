@@ -4,6 +4,17 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+**抖音链接形态与弹幕握手修复。**
+
+- 链接解析：`_douyin_web_rid()` 增加两条规则——`www.douyin.com/…/live/<rid>`（关注页/根页跳转过来的直播间地址，
+  `?anchor_id=…` 之类参数自动忽略）与 `?live_web_rid=<rid>`（直播频道页把房间号放在 query 里，路径是空的）。
+  弹幕客户端 `danmaku/douyin.py` 抽出同规则的 `_web_rid()`，不再只认 `live.douyin.com/<数字>`（以前这类链接
+  会报「抖音弹幕：未能从直播间网页解析出 room_id」）。
+- 弹幕握手：抖音 WSS 端点对**不带 Cookie** 的握手直接回 `HTTP 200` 拒绝（`InvalidStatus: server rejected WebSocket
+  connection: HTTP 200`），表现为「状态 live、条数一直 0」。现在 `DouyinDanmaku._cookie_header()` 始终把从页面拿到的
+  `ttwid` 并进 Cookie（用户填了抖音 Cookie 时保留原 cookie 再补 ttwid），`_consume()` 也改用同一套头；`_prepare()`
+  在直播间页没下发 ttwid 时回退到 `https://live.douyin.com/` 再取一次，仍拿不到就明确报错而不是静默 0 条。
+
 **七项交互与录制逻辑整改。**
 
 - 单线路：`recorder.py` 不再把解析出的多条候选线路挨个试（`candidates = [stream_url]`）。这条线路一个字节都没出
