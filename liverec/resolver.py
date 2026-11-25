@@ -520,7 +520,7 @@ def _resolve_douyin(url: str, quality_code: str, cookie: str, proxy: str) -> dic
 
 
 def _huya_room_id(url: str, proxy: str = "") -> str:
-    """虎牙房间号：数字直接用；短名（www.huya.com/dank1ng）从移动页里取 lChannelId。
+    """虎牙房间号：数字直接用；短名（www.huya.com/<短名>）从移动页里取真实房间号。
 
     cache.php 那套接口只认数字房间号，所以短名必须先换一次。
     """
