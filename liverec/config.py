@@ -107,8 +107,8 @@ class Config:
         return QUALITY_CODES.get(quality or self.quality(), "OD")
 
     def save_format(self) -> str:
-        fmt = (self.raw(SEC_REC, K_FORMAT, "ts") or "ts").strip().lower()
-        return fmt if fmt in FORMATS else "ts"
+        fmt = (self.raw(SEC_REC, K_FORMAT, "flv") or "flv").strip().lower()
+        return fmt if fmt in FORMATS else "flv"
 
     def split_enabled(self) -> bool:
         return self.get_bool(SEC_REC, "分段录制是否开启", True)
