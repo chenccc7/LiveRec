@@ -68,8 +68,8 @@ def probe_duration(path: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
-def _normalize(part: str, out: str) -> tuple[bool, str]:
-    """把一段录好的文件重新封装成时间轴从 0 开始的 TS。
+def _normalize(part: str, out: str, container: str = "mpegts") -> tuple[bool, str]:
+    """把一段录好的文件重新封装成时间轴从 0 开始的容器（默认 TS）。
 
     分段可能是被 CDN 掐断的残缺文件，所以先常规转一次，失败再放宽错误容忍
     重试一次（`-err_detect ignore_err` 能救回大部分「末尾不完整」的 FLV）。
@@ -82,7 +82,7 @@ def _normalize(part: str, out: str) -> tuple[bool, str]:
     for extra in attempts:
         code, err = _run([
             _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-            *extra, "-c", "copy", "-avoid_negative_ts", "make_zero", "-f", "mpegts", out,
+            *extra, "-c", "copy", "-avoid_negative_ts", "make_zero", "-f", container, out,
         ])
         ok = code == 0 and os.path.isfile(out) and os.path.getsize(out) > 0
         if ok and probe_duration(out) > 0.2:
@@ -93,8 +93,49 @@ def _normalize(part: str, out: str) -> tuple[bool, str]:
     return False, last
 
 
+def _write_list(items: list[str], list_path: str) -> None:
+    with open(list_path, "w", encoding="utf-8", newline="\n") as handle:
+        for item in items:
+            handle.write("file '" + item.replace("'", "'\\''") + "'\n")
+
+
+def _concat(items: list[str], out: str, container: str) -> tuple[bool, str]:
+    """直接用 concat 分离器把若干文件拼到 out（流拷贝，不重编码）。"""
+    tmp_root = os.path.join(paths.data_dir(), "merge-tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="c-", dir=tmp_root)
+    try:
+        list_path = os.path.join(tmp_dir, "list.txt")
+        _write_list(items, list_path)
+        attempts = [
+            ["-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy"],
+            ["-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt",
+             "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy"],
+        ]
+        last = ""
+        for extra in attempts:
+            code, err = _run([
+                _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+                *extra, "-f", container, out,
+            ], timeout=3600)
+            ok = code == 0 and os.path.isfile(out) and os.path.getsize(out) > 0
+            if ok and probe_duration(out) > 0.5:
+                return True, f"{probe_duration(out):.1f} 秒"
+            last = " | ".join(err.splitlines()[-3:]) or f"产出为空（rc={code}）"
+            with contextlib.suppress(OSError):
+                os.remove(out)
+        return False, last
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
-    """把一场直播的多个分段拼成一个 TS 文件，返回 (是否成功, 说明)。"""
+    """把一场直播的多个分段拼成一个文件，返回 (是否成功, 说明)。
+
+    虎牙的分段都是同一个源（FLV）切出来的，先试「直接 concat 原始分段」——
+    这条路对「末尾被掐断」的残缺分段最宽容，能救回的信息最多；
+    不行再退回「逐段重封装成 TS 再拼」的老路。
+    """
     parts = [p for p in parts if os.path.isfile(p) and os.path.getsize(p) > 0]
     if not parts:
         return False, "没有可用分段"
@@ -104,44 +145,56 @@ def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
             return False, f"单段重封装失败：{detail}"
         return True, f"{probe_duration(out):.1f} 秒"
 
-    # 临时目录放在程序自己的 data 下：Windows 沙箱/受控环境里 ffmpeg 往往写不进
-    # %TEMP%（会报 Permission denied），而 data 目录一定可写。
+    expected = sum(probe_duration(p) for p in parts)
+    flv_parts = [p for p in parts if p.lower().endswith(".flv")]
+    if len(flv_parts) == len(parts):
+        ok, detail = _concat(parts, out, "flv")
+        got = probe_duration(out) if ok else 0.0
+        # 拼出来的时长至少要覆盖分段合计的六成，否则当作这条路没走通
+        if ok and (not expected or got >= expected * 0.6):
+            note = f"{got:.1f} 秒"
+            if expected and got < expected * 0.9:
+                note += f"（分段合计 {expected:.1f} 秒，残缺部分已跳过）"
+            return True, note
+        log("WARN", f"直接拼接失败（{detail}），改走逐段重封装")
+
     tmp_root = os.path.join(paths.data_dir(), "merge-tmp")
     os.makedirs(tmp_root, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(prefix="m-", dir=tmp_root)
     try:
         normalized: list[str] = []
+        skipped: list[str] = []
         total = 0.0
         for index, part in enumerate(parts):
+            # 优先 TS；TS 转不出来的残缺 FLV 再试一次 FLV 输出（同容器成功率高得多）
+            ok, detail = _normalize(part, os.path.join(tmp_dir, f"p{index:03d}.ts"))
             target = os.path.join(tmp_dir, f"p{index:03d}.ts")
-            ok, detail = _normalize(part, target)
+            if not ok and part.lower().endswith(".flv"):
+                target = os.path.join(tmp_dir, f"p{index:03d}_f.flv")
+                ok, detail = _normalize(part, target, container="flv")
             if not ok:
                 log("WARN", f"分段 {os.path.basename(part)} 无法重封装，已跳过：{detail}")
+                skipped.append(os.path.basename(part))
                 continue
             total += probe_duration(target)
             normalized.append(target)
         if not normalized:
             return False, "所有分段都无法重封装"
 
-        list_path = os.path.join(tmp_dir, "list.txt")
-        with open(list_path, "w", encoding="utf-8", newline="\n") as handle:
-            for item in normalized:
-                handle.write("file '" + item.replace("'", "'\\''") + "'\n")
-
-        merged_tmp = os.path.join(tmp_dir, "merged.ts")
-        code, err = _run([
-            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "concat", "-safe", "0", "-i", list_path,
-            "-c", "copy", "-f", "mpegts", merged_tmp,
-        ])
-        if code != 0 or not os.path.isfile(merged_tmp):
-            return False, "拼接失败：" + (" | ".join(err.splitlines()[-3:]) or "未知错误")
-
-        got = probe_duration(merged_tmp)
-        os.replace(merged_tmp, out)
-        if total and got < total * 0.8:
-            return True, f"{got:.1f} 秒（分段合计 {total:.1f} 秒，部分分段可能已损坏）"
-        return True, f"{got:.1f} 秒"
+        # 归一化后容器可能混着 ts/flv，统一用 concat 分离器 + 各自容器重封装到 ts 不行，
+        # 所以只把 ts 的拿去拼；一个 ts 都没有时退回直接拼原始分段。
+        ts_parts = [p for p in normalized if p.endswith(".ts")]
+        payload = ts_parts or [p for p in parts if p not in skipped]
+        ok, detail = _concat(payload, out, "mpegts")
+        if not ok:
+            return False, "拼接失败：" + detail
+        got = probe_duration(out)
+        note = f"{got:.1f} 秒"
+        if skipped:
+            note += f"（跳过 {len(skipped)} 个残缺分段）"
+        elif total and got < total * 0.8:
+            note += f"（分段合计 {total:.1f} 秒，部分分段可能已损坏）"
+        return True, note
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

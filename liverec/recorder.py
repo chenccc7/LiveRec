@@ -232,7 +232,12 @@ class RecordTask:
         # 而不是过一会儿才出现（删卡片时可能连进程都已经被关掉了）。
         self._refresh_disk()
         self._remember_part()
-        await self._finish_session(blocking=True)
+        try:
+            await self._finish_session(blocking=True)
+        except Exception as exc:  # noqa: BLE001
+            # 拼接/转封装是收尾动作，失败了也不能让「停止录制」整体失败：
+            # 分段文件都还在磁盘上，用户仍能拿到内容，日志里写清原因即可。
+            log("WARN", f"{self.anchor or self.url} 收尾合并失败（分段已保留）：{type(exc).__name__}: {exc}")
         self.push(force=True)
         if was_recording:
             # 停录默认是「静默」的，出问题时看不出录音是谁停的；记一条便于排查。
@@ -582,11 +587,14 @@ class RecordTask:
                 self._remember_part()
             # 虎牙的分片很小（3 个分片 ≈ 1.4MB、3 秒就 EOF），阈值按「有数据」来判，
             # 不能再用 2MB/20 秒，否则每段都被当成失败、不断换线。
-            healthy = code in (0, None) and (chunk_bytes > 512 * 1024 or self.elapsed >= 20)
+            # 注意：只要这一段真的写进了 512KB 以上，就说明线路是活的——
+            # ffmpeg 被我们主动 terminate 时 rc 不是 0，不能因此判成「未出数据」。
+            healthy = chunk_bytes > 512 * 1024 or (code in (0, None) and self.elapsed >= 20)
             if healthy or self._stop.is_set() or index == len(candidates) - 1:
                 break
-            # 这条线路没出数据（虎牙/斗鱼的 CDN 会秒断），换下一条重试
-            log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} 未出数据，尝试下一条")
+            # 这条线路一个字节都没出（虎牙/斗鱼的 CDN 会秒断），换下一条重试
+            if chunk_bytes <= 0:
+                log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} 未出数据，尝试下一条")
             self._discard_empty_files(out_dir, prefix)
 
         if self.platform != "huya":
