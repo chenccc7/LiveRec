@@ -526,7 +526,14 @@ _DOUYIN_QUALITY = {"OD": "origin", "BD": "FULL_HD1", "UHD": "HD1",
 
 
 def _douyin_web_rid(url: str, proxy: str) -> str:
+    # 直播间地址有几种写法，web_rid 都是最后那串数字：
+    #   https://live.douyin.com/531854687617
+    #   https://live.douyin.com/share/531854687617
+    #   https://www.douyin.com/follow/live/531854687617?anchor_id=...
+    #   https://www.douyin.com/root/live/531854687617
     m = re.search(r"live\.douyin\.com/(?:share/)?(\d+)", url)
+    if not m:
+        m = re.search(r"douyin\.com/(?:[^?#]*?/)?live/(\d{5,})", url)
     if m:
         return m.group(1)
     if "v.douyin.com" in url:
@@ -534,12 +541,18 @@ def _douyin_web_rid(url: str, proxy: str) -> str:
 
         resp = requests.get(url, headers={"user-agent": _DOUYIN_UA}, allow_redirects=True,
                             proxies=_proxies(proxy), timeout=20)
-        m = re.search(r"live\.douyin\.com/(?:share/)?(\d+)", resp.url)
+        final = resp.url or ""
+        m = re.search(r"live\.douyin\.com/(?:share/)?(\d+)", final)
+        if not m:
+            m = re.search(r"douyin\.com/(?:[^?#]*?/)?live/(\d{5,})", final)
+        if m:
+            return m.group(1)
+        m = re.search(r"live\.douyin\.com/(\d{5,})", resp.text or "")
         if m:
             return m.group(1)
     if "/user/" in url:
         raise ResolveError("抖音主页链接暂不支持，请粘贴直播间地址（live.douyin.com/数字）")
-    raise ResolveError("未能从链接中解析出抖音房间号")
+    raise ResolveError("未能从链接中解析出抖音房间号（支持 live.douyin.com/数字、www.douyin.com/follow/live/数字）")
 
 
 def _douyin_enter(web_rid: str, cookie: str, proxy: str) -> tuple[dict[str, Any], dict[str, Any]]:
