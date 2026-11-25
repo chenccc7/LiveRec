@@ -1193,6 +1193,9 @@ function injectStyle() {
 }
 
 async function boot() {
+  // 标题带上端口：程序换端口重启后，旧窗口的标题对不上，就不会被误当成当前窗口，
+  // 也不会出现「看着是控制台、其实那一页早就 404」的情况。
+  document.title = `LiveRec 控制台 · ${location.port}`;
   injectStyle();
   fillSelects();
   syncModalToggles();

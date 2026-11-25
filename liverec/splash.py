@@ -68,9 +68,16 @@ _HTML = """<!DOCTYPE html>
       if (s.text) t.textContent = s.text;
       if (s.url && !jumping) { jumping = true; target = 100; t.textContent = '正在打开控制台…';
         setTimeout(() => location.replace(s.url), 380); return; }
-    } catch (e) {}
+    } catch (e) {
+      t.textContent = '正在等待本地服务…';
+    }
+    // 卡太久时给个可操作的提示，而不是一直转圈
+    if (Date.now() - started > 60000 && !jumping) {
+      t.textContent = '启动时间比预期长，可查看 data/logs 下的日志；本窗口会自动重试';
+    }
     setTimeout(poll, 220);
   }
+  const started = Date.now();
   poll();
 </script>
 </body></html>
@@ -91,6 +98,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", body)
         elif path == "/state":
             body = json.dumps(server.state, ensure_ascii=False).encode("utf-8")  # type: ignore[attr-defined]
+            if server.state.get("url"):  # type: ignore[attr-defined]
+                # 页面已经拿到控制台地址，可以开始倒计时关闭本服务了
+                server.served_ready = True  # type: ignore[attr-defined]
             self._send(200, "application/json; charset=utf-8", body)
         elif path == "/icon.ico":
             icon = _icon_bytes()
@@ -159,12 +169,23 @@ class Splash:
         if text:
             self.state["text"] = text
 
-    def ready(self, url: str, linger: float = 8.0) -> None:
+    def ready(self, url: str, linger: float = 20.0, hard_cap: float = 240.0) -> None:
         self.state["pct"] = 100
         self.state["text"] = "正在打开控制台…"
         self.state["url"] = url
 
         def _later() -> None:
+            # 关键：必须等到「真的把这个地址发给过页面」再关服务。
+            # 以前是 ready 之后固定 8 秒就关，浏览器冷启动慢一点、或者窗口是
+            # 后来才被拉起的，就会落在一个已经关掉的端口上 → 一排「无法访问此页面」。
+            started = time.time()
+            while time.time() - started < hard_cap:
+                server = self._server
+                if server is None:
+                    return
+                if getattr(server, "served_ready", False):
+                    break
+                time.sleep(0.3)
             time.sleep(linger)
             self.stop()
 

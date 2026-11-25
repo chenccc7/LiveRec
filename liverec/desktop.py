@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import webbrowser
+from urllib.parse import urlsplit
 
 from . import paths
 from .logbook import log
@@ -167,6 +168,20 @@ class AppWindow:
         return False
 
     # ---------- 打开 / 唤醒 ----------
+    @property
+    def live_title(self) -> str:
+        """带端口的窗口标题，用来区分「指向当前服务的窗口」和以前的僵尸窗口。
+
+        页面加载后会把自己标题设成 `LiveRec 控制台 · <port>`；程序换了端口重启
+        （或者上次没关干净）时，旧窗口标题里的端口对不上，就不会被误认成当前窗口。
+        """
+        port = ""
+        try:
+            port = str(urlsplit(self.url).port or "")
+        except ValueError:
+            port = ""
+        return f"{self.title} · {port}" if port else self.title
+
     def show(self) -> str:
         """把控制台窗口带到前台；没有窗口就开一个（任何时刻只留一个）。
 
@@ -175,26 +190,19 @@ class AppWindow:
         """
         with self._lock:
             for attempt in range(4):
-                if _focus_window(self.title):
+                if _focus_window(self.live_title):
                     return "focused"
                 time.sleep(0.15 if attempt == 0 else 0.35)
-            # 真没有窗口（或停在「无法访问此页」这种标题）→ 先清掉残留再开
-            self._kill()
+            # 没有指向当前服务的窗口：把标题还停在旧端口上的僵尸窗口清掉再开一个，
+            # 否则会同时留着几个「LiveRec 控制台」，用户点到的是已经关掉的那个页面。
+            stale = _close_windows(self.title)
+            if stale:
+                log("INFO", f"清理了 {stale} 个指向旧地址的控制台窗口")
+                time.sleep(0.2)
             return self._open()
 
     def _kill(self) -> None:
         _close_windows(self.title)
-        if self.proc is not None and self.proc.poll() is None:
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=5)
-            except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-
-    def _kill(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             try:
                 self.proc.terminate()
