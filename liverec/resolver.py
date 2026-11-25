@@ -646,6 +646,18 @@ def _huya_module():
     return huya
 
 
+def drop_cache(url: str) -> None:
+    """丢掉这个房间的接口缓存（连同 CDN 偏好），下次 resolve 会重新问接口拿新地址。
+
+    虎牙的地址是一次性的：断流后要「换地址」而不是拿旧地址重算签名，
+    所以每次续段前都清一次缓存。
+    """
+    try:
+        _huya_module().drop_cache(url)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _resolve_huya(url: str, quality_code: str, cookie: str, proxy: str) -> dict[str, Any]:
     return _huya_module().resolve(url, quality_code, cookie, proxy)
 

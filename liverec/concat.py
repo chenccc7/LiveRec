@@ -158,7 +158,7 @@ def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
             return True, note
         log("WARN", f"直接拼接失败（{detail}），改走逐段重封装")
 
-    tmp_root = os.path.dirname(os.path.abspath(items[0])) if items else tempfile.gettempdir()
+    tmp_root = os.path.dirname(os.path.abspath(parts[0]))
     os.makedirs(tmp_root, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(prefix="m-", dir=tmp_root)
     try:

@@ -105,6 +105,9 @@ class RecordTask:
         self.error = ""
         self.started_at = 0.0
         self.elapsed = 0.0
+        # 虎牙一场会被切成多段，已录时长要跨段累计，不能每段归零
+        self._elapsed_base = 0.0
+        self._huya_stall_streak = 0
         self.size = 0
         self.size_text = "0 B"
         self.bitrate = ""
@@ -136,7 +139,9 @@ class RecordTask:
     # ---------- 对外快照 ----------
     def snapshot(self) -> dict[str, Any]:
         if self.status == "recording" and self._live_since:
-            self.elapsed = max(self.elapsed, time.time() - self._live_since)
+            self.elapsed = max(self.elapsed,
+                               getattr(self, "_elapsed_base", 0.0)
+                               + time.time() - self._live_since)
         return {
             "id": self.room_id,
             "url": self.url,
@@ -208,6 +213,9 @@ class RecordTask:
         self.record_url = ""
         self.started_at = 0.0
         self.elapsed = 0.0
+        # 虎牙一场会被切成多段，已录时长要跨段累计，不能每段归零
+        self._elapsed_base = 0.0
+        self._huya_stall_streak = 0
         self.next_check_at = 0.0
         # 弹幕状态也得跟着清零：否则新一场的计数会从上一场的数字开始跳，
         # 卡片上的「弹幕 N 条」就会一会儿大一会儿小。
@@ -397,6 +405,22 @@ class RecordTask:
             await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
+            if self.platform == "huya" and self._huya_stall_streak >= 2:
+                # 连续两次「8 秒没有写入数据」：这条流已经救不回来了，
+                # 把计数清零回等待开播，等下一轮检测（下播/风控/线路全挂都会这样）。
+                self._no_data = False
+                self._no_data_streak = 0
+                self._huya_stall_streak = 0
+                interval = cfg.check_interval()
+                self.status = "waiting"
+                self.error = ""
+                self.note = f"连续 2 次 8 秒没有写入数据，已回到等待开播（{interval} 秒后重新检测）"
+                self.next_check_at = time.time() + interval
+                self.push(force=True)
+                log("INFO", f"{self.anchor or self.url} 连续 2 次没有写入数据，"
+                            f"已回到等待开播，{interval}s 后重新检测")
+                await self._wait(interval)
+                continue
             if self._no_data and self.size <= 0 and self._no_data_streak >= 2:
                 # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
                 self._no_data = False
@@ -428,6 +452,8 @@ class RecordTask:
                         f"{self.anchor or self.url} 第 {self._chunk_index} 段录到 "
                         f"{chunk / 1048576:.2f} MB（累计 {self.size_text}），换新签名续录",
                     )
+                    # 换「地址」而不是重签：清掉接口缓存，下一轮 resolve 会拿新地址（可能换 CDN）。
+                    self._drop_route_cache()
                     await self._wait(1.5)
                     continue
                 # 这一段什么都没录到（CDN 拒绝/中转失败）：把 0 字节的空壳清掉，
@@ -441,6 +467,7 @@ class RecordTask:
                 if self._huya_streak <= 3:
                     log("INFO", f"{self.anchor or self.url} 这一段没读到数据，换新签名重试"
                                 f"（{self._huya_streak}/3）")
+                    self._drop_route_cache()
                     await self._wait(2.0)
                     continue
             # 录制结束（主播下播/断流）：稍等再回到轮询
@@ -519,7 +546,7 @@ class RecordTask:
 
         self.started_at = time.time()
         self._live_since = time.time()
-        self.elapsed = 0.0
+        self.elapsed = getattr(self, "_elapsed_base", 0.0)
         self.size = self._base_bytes
         self.size_text = _fmt_size(self.size)
         self.segments = 0
@@ -588,7 +615,12 @@ class RecordTask:
                 # 一个字节都没出：这条线路就是死的（403/秒断/挂住），
                 # 直接结束这一段，回到「等待开播」，不换线路、也不报错。
                 first_wait = 45.0 if self.platform == "huya" else 20.0
-                if self.size <= 0 and time.time() - attempt_started > first_wait:
+                # 虎牙已续过段（说明这条线路是能出数据的）时只看 8 秒；
+                # 第一段仍给 45 秒冷启动时间，否则 HLS 还没起播就被判死。
+                if self.platform == "huya" and self._chunk_index > 0:
+                    first_wait = 8.0
+                chunk_now = self.size - self._base_bytes
+                if chunk_now <= 0 and time.time() - attempt_started > first_wait:
                     self._no_data = True
                     # 连续两次都没出数据才回等待；只失败一次就先重试，别把整场打断。
                     self._no_data_streak += 1
@@ -601,9 +633,19 @@ class RecordTask:
                 # 虎牙专用：已经录到过数据、但这一段 20 秒没有任何增长。
                 # 这不是「停录」，而是换一条新签名的地址接着录（每段单独落文件），
                 # 否则 ffmpeg 会挂在那里不动、卡片一直显示「录制中」但体积不变。
-                if (self.platform == "huya" and self.size > self._base_bytes
+                if (self.platform == "huya"
+                        and (self.size > self._base_bytes or self._chunk_index > 0)
                         and time.time() - self._last_growth > 8.0):
-                    log("WARN", f"{anchor} 这 8 秒没有再写入数据（虎牙签名到期），换新地址接着录")
+                    # 只要 8 秒没写入就直接丢掉这条地址、重新问接口拿新地址（换 CDN），
+                    # 不再对旧地址重算签名——旧地址要么已过期、要么被 CDN 限流，重签没用。
+                    self._huya_stall_streak += 1
+                    if self._huya_stall_streak >= 2:
+                        log("WARN", f"{anchor} 连续 {self._huya_stall_streak} 次 8 秒没有写入数据，"
+                                    f"回到等待开播")
+                        self._no_data = True
+                        self._no_data_streak = 2
+                    else:
+                        log("WARN", f"{anchor} 这 8 秒没有再写入数据，丢掉这条地址换新地址接着录")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -626,6 +668,12 @@ class RecordTask:
             # 这一段已经落盘（哪怕是被 CDN 掐断的），记下来供收尾时拼接
             if chunk_bytes > 0:
                 self._remember_part()
+                # 有数据的一段结束：已录时长累计进来（虎牙一场要续好几段，
+                # 不累计的话卡片上的时长每段都会归零），并把「连续无写入」清零。
+                self._elapsed_base = (getattr(self, "_elapsed_base", 0.0)
+                                      + max(0.0, time.time() - self._live_since))
+                self.elapsed = self._elapsed_base
+                self._huya_stall_streak = 0
             # 只有一条线路，录到了就继续（虎牙走分片续录），没录到就回等待开播。
             healthy = chunk_bytes > 512 * 1024 or (code in (0, None) and self.elapsed >= 20)
             if chunk_bytes <= 0 and not self._stop.is_set():
@@ -643,12 +691,13 @@ class RecordTask:
             await self._stop_danmaku()
         if self._stop.is_set():
             return
-        if self._no_data and self.platform == "huya" and self.size > 0:
-            # 虎牙：本段没有读到数据，但这一场已经录到东西了 —— 不算「线路不通」，
-            # 交给 _run() 的续段逻辑立刻换新签名重试，卡片保持「录制中」。
+        if (self._no_data and self.platform == "huya" and self.size > 0
+                and self._huya_stall_streak < 2):
+            # 虎牙：本段没有读到数据，但这一场已经录到东西了 —— 第一次只换地址继续，
+            # 连续两次 8 秒没有写入才算这条流真的死了，回等待开播。
             self._no_data = True
             self.status = "recording"
-            self.note = "这一段没读到数据，正在换新签名重试"
+            self.note = "这一段没读到数据，正在换新地址重试"
         elif self._no_data and self._no_data_streak >= 2:
             # 连续两次都没出数据：不报错、不换线，回等待开播等下一轮检测。
             self.status = "waiting"
@@ -664,6 +713,13 @@ class RecordTask:
         else:
             log("INFO", f"{anchor} 本次录制结束（{_fmt_size(self.size)}，{self.segments or 1} 个文件）")
         self.push(force=True)
+
+    def _drop_route_cache(self) -> None:
+        """虎牙断流后要「换地址」而不是拿旧地址重签：清接口缓存，下一轮拿新地址。"""
+        if self.platform != "huya":
+            return
+        with contextlib.suppress(Exception):
+            resolver.drop_cache(self.url)
 
     @staticmethod
     def _discard_empty_files(out_dir: str, prefix: str) -> None:
@@ -892,7 +948,9 @@ class RecordTask:
     def _on_progress(self, key: str, val: str) -> None:
         if key == "out_time_us":
             try:
-                self.elapsed = max(self.elapsed, int(val) / 1_000_000)
+                self.elapsed = max(self.elapsed,
+                                       getattr(self, "_elapsed_base", 0.0)
+                                       + int(val) / 1_000_000)
             except ValueError:
                 pass
         elif key == "total_size":

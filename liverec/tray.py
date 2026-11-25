@@ -1,7 +1,7 @@
 """系统托盘常驻（原生 Win32 实现，不依赖 pystray）。
 
 关掉控制台窗口后录制继续；托盘菜单可以唤回控制台、全部开始/停止、
-打开录制目录、切换无人值守、退出。
+打开录制目录、退出。
 
 之所以不用 pystray：打包成 windowed exe 后它内部的
 ``ChangeWindowMessageFilterEx`` 会返回 WinError 5，托盘直接起不来。
@@ -249,8 +249,6 @@ class Tray:
             u.AppendMenuW(menu, MF_STRING, CMD_START_ALL, "全部开始监测")
             u.AppendMenuW(menu, MF_STRING, CMD_STOP_ALL, "全部停止")
             u.AppendMenuW(menu, MF_STRING, CMD_OPEN_FOLDER, "打开录制目录")
-            u.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            u.AppendMenuW(menu, MF_STRING, CMD_TOGGLE_UA, self._unattended_label())
             u.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             u.AppendMenuW(menu, MF_STRING, CMD_QUIT, "退出 LiveRec（停止录制）")
 
