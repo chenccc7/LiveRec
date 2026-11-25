@@ -147,23 +147,53 @@ def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
 
 
 def remux(src: str, fmt: str) -> tuple[bool, str]:
-    """把拼接好的中间文件转成用户选的容器（流拷贝，不重新编码）。"""
+    """把录好的文件转成用户选的容器（流拷贝，不重新编码）。
+
+    分段末尾可能是被 CDN 掐断的半个包，直接 `-c copy` 会报
+    `Error muxing a packet / Invalid data`。这里先常规转一次，失败再放宽错误容忍
+    重试；只要转出来的文件有可播放时长，就当成成功（末尾残缺极少数帧无妨）。
+    """
     ext = _FORMAT_EXT.get(fmt, "")
     if not ext or src.lower().endswith("." + ext):
         return True, "无需转换"
     out = os.path.splitext(src)[0] + "." + ext
     extra = _TARGET_TEMPLATE.get(ext, [])
-    code, err = _run([
-        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-        "-i", src, "-c", "copy", *extra, out,
-    ])
-    if code != 0 or not os.path.isfile(out) or os.path.getsize(out) <= 0:
+    attempts = [
+        ["-i", src],
+        ["-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt", "-i", src],
+    ]
+    last = ""
+    for input_args in attempts:
         with contextlib.suppress(OSError):
             os.remove(out)
-        return False, "转封装失败：" + (" | ".join(err.splitlines()[-3:]) or "未知错误")
-    with contextlib.suppress(OSError):
-        os.remove(src)
-    return True, os.path.basename(out)
+        code, err = _run([
+            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+            *input_args, "-c", "copy", *extra, out,
+        ])
+        duration = probe_duration(out)
+        if os.path.isfile(out) and duration > 1.0:
+            with contextlib.suppress(OSError):
+                os.remove(src)
+            note = os.path.basename(out)
+            if code != 0:
+                note += f"（末尾 {duration:.0f} 秒后数据不完整，已保留可播部分）"
+            return True, note
+        last = " | ".join((err or "").splitlines()[-3:]) or f"产出不可播放（rc={code}）"
+        with contextlib.suppress(OSError):
+            os.remove(out)
+    return False, "转封装失败：" + last
+
+
+def convert_session(path: str, target_fmt: str = "") -> None:
+    """只有一段时的收尾：直接按用户选的容器转封装（虎牙中间文件固定是 FLV）。"""
+    label = os.path.basename(path)
+    if not target_fmt:
+        return
+    ok, detail = remux(path, target_fmt)
+    if not ok:
+        log("WARN", f"{label} 转成「{target_fmt}」失败，保留原始文件：{detail}")
+    elif detail != "无需转换":
+        log("SUCCESS", f"{label} 已转成 {detail}")
 
 
 def merge_session(parts: list[str], out: str, keep_parts: bool = False,

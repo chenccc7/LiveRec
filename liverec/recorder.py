@@ -29,6 +29,10 @@ _PROGRESS_KEYS = ("out_time_us", "total_size", "bitrate", "speed", "progress")
 # 直播断流时 ffmpeg 常常既不退出也不报错，只是不再写文件，用户看到的就是「卡片还在录制中但大小不动」。
 STALL_SECONDS = 60.0
 
+# 看门狗总开关：关闭后只会因为 ffmpeg 自己退出而收尾，不会因为「一段时间没长字节」就停录。
+# 用户要求关掉它——虎牙按分片续录时，换段瞬间的停顿会被误判成「没录到数据」。
+STALL_WATCHDOG = False
+
 
 def safe_name(text: str, fallback: str = "未知主播") -> str:
     out = _BAD_CHARS.sub("_", (text or "").strip()).strip(" ._")
@@ -93,9 +97,9 @@ class RecordTask:
         self.anchor = ""
         self.title = ""
         self.platform = resolver.detect_platform(url)
-        # 虎牙的流签名只有 20 秒左右有效期，CDN 会主动掐断；等 60 秒再重试期间卡片看着像「没数据」。
-        # 这里给虎牙用更短的判停阈值 + 立即重连，表现成「分段落盘、总在写」。
-        self._stall_seconds = 15.0 if self.platform == "huya" else STALL_SECONDS
+        # 看门狗已按用户要求关闭：`_stall_seconds = 0` 表示永不因为「没长字节」停录。
+        # 虎牙仍会在 ffmpeg 自己退出（签名过期/CDN 掐断）时按分片续录。
+        self._stall_seconds = (15.0 if self.platform == "huya" else STALL_SECONDS) if STALL_WATCHDOG else 0.0
         # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
         self._huya_streak = 0
         self._chunk_index = 0
@@ -593,8 +597,10 @@ class RecordTask:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
                     break
-                # 已经出过数据，但连续一分钟不再增长：判流挂住，停止本次录制回到等待开播
-                if self.size > 0 and time.time() - self._last_growth > self._stall_seconds:
+                # 已经出过数据，但连续一段时间不再增长：判流挂住，停止本次录制回到等待开播。
+                # 看门狗关闭时 `_stall_seconds` 为 0，这里直接跳过，只等 ffmpeg 自己退出。
+                if (self._stall_seconds > 0 and self.size > 0
+                        and time.time() - self._last_growth > self._stall_seconds):
                     self._stalled = True
                     log("WARN", f"{anchor} 连续 {int(self._stall_seconds)} 秒没有新数据，停止录制，回到等待开播")
                     if self._proc:
@@ -682,12 +688,30 @@ class RecordTask:
                         f"（{_fmt_size(size)}）：{name}")
 
     def _finish_session(self) -> None:
-        """这场直播结束（下播/停录/被限流）时，把分段拼成一个完整文件。"""
+        """这场直播结束时，把虎牙的分段拼成一个完整文件。
+
+        只有虎牙会「分段续录」，其它平台保持老行为：一个房间一个文件，
+        中途换线留下的文件原样留着，不做任何拼接。
+        """
         parts = [p for p in self._parts if os.path.isfile(p)]
         self._parts = []
+        if self.platform != "huya":
+            return
         if len(parts) < 2:
             if parts:
-                log("INFO", f"{self.anchor or self.url} 本次只有 1 个分段，无需拼接")
+                # 只有一段也要收尾：虎牙中间文件是 FLV，按用户选的格式转一次，
+                # 否则设置里选了 ts/mp4 却只拿到一个 .flv。
+                target_fmt = ""
+                try:
+                    target_fmt = self.cfg.save_format()
+                except Exception:  # noqa: BLE001
+                    target_fmt = ""
+                threading.Thread(
+                    target=concat.convert_session,
+                    args=(parts[0], target_fmt),
+                    daemon=True,
+                    name="convert",
+                ).start()
             return
         first = os.path.basename(parts[0])
         stem = re.sub(r"(_\d+)+\.(ts|mkv|flv|mp4)$", "", first) or (self.anchor or "session")
