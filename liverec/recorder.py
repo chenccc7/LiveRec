@@ -97,6 +97,7 @@ class RecordTask:
         self._stall_seconds = 15.0 if self.platform == "huya" else STALL_SECONDS
         # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
         self._huya_streak = 0
+        self._chunk_index = 0
         self.error = ""
         self.started_at = 0.0
         self.elapsed = 0.0
@@ -191,6 +192,7 @@ class RecordTask:
         self._last_growth = time.time()
         self._base_bytes = 0
         self._huya_streak = 0
+        self._chunk_index = 0
         self.size = 0
         self.size_text = "0 B"
         self.bitrate = ""
@@ -212,6 +214,7 @@ class RecordTask:
         self._loop_task = asyncio.create_task(self._guarded_run())
 
     async def stop(self, status: str = "stopped") -> None:
+        was_recording = self.status == "recording"
         self._stop.set()
         await self._kill_proc()
         await self._stop_danmaku()
@@ -226,6 +229,9 @@ class RecordTask:
         self.status = status
         self.next_check_at = 0.0
         self.push(force=True)
+        if was_recording:
+            # 停录默认是「静默」的，出问题时看不出录音是谁停的；记一条便于排查。
+            log("INFO", f"{self.anchor or self.url} 录制任务已停止（{status}），本段 {self.size_text}")
 
     async def _kill_proc(self) -> None:
         proc = self._proc
@@ -375,11 +381,17 @@ class RecordTask:
                 chunk = self.size - self._base_bytes
                 if chunk >= 300 * 1024:
                     self._huya_streak = 0
+                    self._chunk_index += 1
                     self._base_bytes = self.size
                     self.status = "recording"
                     self.error = ""
                     self.note = "虎牙签名到期自动续录（每段单独成文件）"
                     self.push(force=True)
+                    log(
+                        "INFO",
+                        f"{self.anchor or self.url} 第 {self._chunk_index} 段录到 "
+                        f"{chunk / 1048576:.2f} MB（累计 {self.size_text}），换新签名续录",
+                    )
                     await self._wait(1.5)
                     continue
                 # 这一段什么都没录到（CDN 拒绝/中转失败）：把 0 字节的空壳清掉，
@@ -410,6 +422,7 @@ class RecordTask:
                         f"{self.anchor or self.url} 连续 {self._huya_streak} 段没有新数据"
                         "（可能被 CDN 限流），暂停重试，回到等待开播")
                     self._huya_streak = 0
+                    self._chunk_index = 0
                 # 无数据看门狗：不报错，回到等待开播；断流大多是线路被掐，
                 # 先按短间隔重试（15 秒），让换线/重连尽快生效。
                 await self._stop_danmaku()
@@ -422,6 +435,11 @@ class RecordTask:
                 continue
             # 录制结束（主播下播/断流）：稍等再回到轮询
             await self._stop_danmaku()
+            log(
+                "INFO",
+                f"{self.anchor or self.url} 本段录制结束（{self.size_text}），"
+                "15 秒后重新检测开播状态",
+            )
             self.status = "waiting"
             self.note = ""
             self.next_check_at = time.time() + 15
@@ -528,11 +546,21 @@ class RecordTask:
             self._last_error_lines = []
             attempt_started = time.time()
             self._last_growth = time.time()
+            last_beat = time.time()
             pump = asyncio.create_task(self._pump())
             while True:
                 done, _ = await asyncio.wait({pump}, timeout=5)
                 if done:
                     break
+                # 每分钟留一条「还活着」的日志：出问题时能一眼看出是录着不涨还是彻底没动。
+                if time.time() - last_beat >= 60 and self.size > 0:
+                    last_beat = time.time()
+                    log(
+                        "INFO",
+                        f"{self.anchor or self.url} 录制中 {self.size_text}"
+                        f"（{self.resolution or '-'} {self.bitrate or '-'}，"
+                        f"已录 {int(self.elapsed)} 秒）",
+                    )
                 # 一条线路迟迟一个字节都没有：死线路（403/秒断/挂住），直接换下一条。
                 # 虎牙的线路一开拉就出数据，等 8 秒足够；其它平台给 20 秒（起播慢的 CDN 不少）。
                 first_wait = 8.0 if self.platform == "huya" else 20.0
