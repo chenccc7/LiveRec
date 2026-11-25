@@ -71,6 +71,7 @@ class SettingsBody(BaseModel):
     quality: str | None = None
     saveFormat: str | None = None
     saveRoot: str | None = None
+    danmakuRoot: str | None = None
     splitEnabled: bool | None = None
     splitSeconds: int | None = None
     loopInterval: int | None = None
@@ -110,6 +111,29 @@ def _cookies_masked() -> dict[str, Any]:
     return out
 
 
+async def _cookie_audit() -> None:
+    """启动时把四份 Cookie 全查一遍，结果写进运行日志（各平台只记一条）。"""
+    await asyncio.sleep(1.2)
+    labels = {"douyin": "抖音", "bilibili": "B站", "huya": "虎牙", "douyu": "斗鱼"}
+    for platform, label in labels.items():
+        raw = cfg.cookie(platform)
+        if not raw:
+            log("INFO", f"Cookie 启动校验 · {label}：未设置（游客模式）")
+            continue
+        try:
+            res = await cookie_check.check_cookie(platform, raw, cfg.proxy_for(platform))
+        except Exception as exc:  # noqa: BLE001 - 校验失败不影响启动
+            log("WARN", f"Cookie 启动校验 · {label}：检测失败 {type(exc).__name__}: {exc}")
+            continue
+        message = res.get("message") or ""
+        if res.get("state") == "login":
+            log("SUCCESS", f"Cookie 启动校验 · {label}：{message}")
+        elif res.get("ok") is False:
+            log("WARN", f"Cookie 启动校验 · {label}：{message}")
+        else:
+            log("INFO", f"Cookie 启动校验 · {label}：{message}")
+
+
 async def _apply_startup() -> None:
     hub.loop = asyncio.get_running_loop()
     manager.subscribe(_on_manager_event)
@@ -118,6 +142,8 @@ async def _apply_startup() -> None:
         await manager.resume_unattended()
     except Exception as exc:  # 自动恢复失败不能拖垮启动
         log("WARN", f"无人值守自动恢复失败：{exc}")
+    # 启动自检放在后台，别拖慢窗口打开
+    asyncio.create_task(_cookie_audit())
 
 
 def _on_manager_event(event: dict[str, Any]) -> None:

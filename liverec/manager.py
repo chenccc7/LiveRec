@@ -392,9 +392,15 @@ class Manager:
                 }
             snap = dict(snap)
             snap["enabled"] = bool(room.get("enabled", True))
+            snap["danmaku"] = bool(room.get("danmaku", True))
             snap["danmakuEnabled"] = bool(room.get("danmaku", True))
             snap["unattended"] = bool(room.get("unattended", bool(self.unattended)))
-            snap["quality"] = room.get("quality") or snap.get("quality")
+            # 画质以「正在跑的任务」为准：录制端开录前会按房间当前真实档位校正 quality，
+            # 如果这里再用 meta 里的旧值覆盖回去，卡片显示的档位就会和实际录制的不一致。
+            live_quality = snap.get("quality")
+            if rid in self.runtime and live_quality and live_quality != room.get("quality"):
+                room["quality"] = live_quality      # 同步回元数据，下次启动也沿用真实档位
+            snap["quality"] = live_quality or room.get("quality")
             out.append(snap)
         return out
 

@@ -120,7 +120,8 @@ class DanmakuSession:
     """一个直播场次的弹幕采集会话。"""
 
     def __init__(self, client, platform: str, room_key: str, anchor: str,
-                 video_dir: str, room_id: str, on_event: Callable[[dict], None]):
+                 video_dir: str, room_id: str, on_event: Callable[[dict], None],
+                 danmaku_dir: str = ""):
         self.client = client
         self.platform = platform
         self.room_key = room_key
@@ -133,9 +134,11 @@ class DanmakuSession:
         # 两份会话共用一个 JSONL 与一行 DB 记录，条数就会一会儿大一会儿小。
         # 追加 4 位随机串保证每次录制都有独立会话。
         self.session_id = f"{platform}_{_safe_name(anchor)}_{stamp}_{uuid4().hex[:4]}"
-        # 弹幕明细跟着视频走：放在这次录制的视频目录下的 danmaku/ 子目录里，
-        # 这样「视频 + 弹幕」永远在同一个主播文件夹内，拷贝/归档不会漏掉。
-        if video_dir:
+        # 弹幕明细默认跟着视频走（这次录制的视频目录下的 danmaku/），
+        # 用户也可以在「设置 → 弹幕保存路径」里指定一个统一目录。
+        if danmaku_dir:
+            folder = os.path.join(danmaku_dir, platform, _safe_name(anchor))
+        elif video_dir:
             folder = os.path.join(video_dir, "danmaku")
         else:
             folder = os.path.join(paths.danmaku_dir(), platform, _safe_name(anchor))

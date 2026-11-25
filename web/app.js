@@ -238,11 +238,23 @@ async function toggleRoomUnattended(rid, next) {
     await api(`/api/rooms/${rid}`, { method: 'PATCH', body: { unattended: next } });
     const room = S.rooms.find(r => String(r.id) === String(rid));
     if (room) room.unattended = next;
-    pushLocalLog(next ? 'INFO' : 'INFO',
+    pushLocalLog('INFO',
       next ? '该直播间已开启无人值守：下次启动会自动进入开播监测' : '该直播间已关闭无人值守：下次启动不再自动监测');
     renderAll();
   } catch (err) {
     pushLocalLog('ERROR', `切换无人值守失败：${err.message}`);
+  }
+}
+
+async function toggleRoomDanmaku(rid, next) {
+  try {
+    await api(`/api/rooms/${rid}`, { method: 'PATCH', body: { danmaku: next } });
+    const room = S.rooms.find(r => String(r.id) === String(rid));
+    if (room) room.danmaku = next;
+    pushLocalLog('INFO', next ? '该直播间已开启弹幕录制（会重启录制任务）' : '该直播间已关闭弹幕录制（会重启录制任务）');
+    renderAll();
+  } catch (err) {
+    pushLocalLog('ERROR', `切换弹幕录制失败：${err.message}`);
   }
 }
 
@@ -352,6 +364,7 @@ function escapeHtml(s) {
     fileName: r.currentFile ? String(r.currentFile).split(/[\\/]/).pop() : '',
     proxy: isOn(S.settings.proxyEnabled),
     unattended: r.unattended !== false,
+    danmaku: r.danmaku !== false,
     qualityNote: r.qualityNote || '',
     qualityActual: r.qualityActual || '',
     note: r.note || '',
@@ -385,6 +398,12 @@ function renderCard(r0) {
       ? `<span class="tag warn" title="${escapeHtml(r.qualityNote)}">${r.qualityActual || r.quality || '原画'}·降级</span>`
       : `<span class="tag">${r.quality || '原画'}</span>`,
     r.proxy ? '<span class="tag proxy">代理</span>' : '',
+    // 每张卡片各自的弹幕开关：关掉就是「只录视频、不录弹幕」
+    `<button class="tag dm${r.danmaku ? ' on' : ''}" data-act="dm"
+       title="${r.danmaku
+        ? '弹幕录制：已开启（点击关闭，只录视频）'
+        : '弹幕录制：已关闭（点击开启，切换时会重启录制任务）'}">
+       <i class="autodot"></i>${r.danmaku ? '弹幕' : '无弹幕'}</button>`,
     // 每张卡片各自的无人值守开关：开着 = 下次启动会自动进入开播监测
     `<button class="tag auto${r.unattended ? ' on' : ''}" data-act="auto"
        title="${r.unattended
@@ -405,7 +424,6 @@ function renderCard(r0) {
         <div class="stat"><div class="k">文件大小</div><div class="v" data-f="size">${r.sizeText}</div></div>
         <div class="stat"><div class="k">码率</div><div class="v" data-f="bitrate">${r.bitrateText}</div></div>
         <div class="stat"><div class="k">分辨率</div><div class="v" data-f="res">${r.resText}</div></div>
-        <div class="stat"><div class="k">分段</div><div class="v" data-f="seg">${Math.max(1, r.segments || 1)} 个</div></div>
       </div>
       <div class="file">${svg(ICON.doc, 12)}<span data-f="file">${escapeHtml(r.fileName || '等待第一段落盘…')}</span></div>`;
   } else if (wait) {
@@ -437,7 +455,6 @@ function renderCard(r0) {
         <div class="stat"><div class="k">已录时长</div><div class="v" data-f="elapsed">${r.elapsedText}</div></div>
         <div class="stat"><div class="k">文件大小</div><div class="v" data-f="size">${r.sizeText}</div></div>
         <div class="stat"><div class="k">分辨率</div><div class="v" data-f="res">${r.resText}</div></div>
-        <div class="stat"><div class="k">分段</div><div class="v" data-f="seg">${r.segText}</div></div>
       </div>
       ${r.fileName ? `<div class="file">${svg(ICON.doc, 12)}<span data-f="file">${escapeHtml(r.fileName)}</span></div>` : ''}`;
   }
@@ -472,7 +489,7 @@ function renderCard(r0) {
         : `<button class="ibtn" data-act="start" title="开始录制">${svg(ICON.play)}</button>${folderBtn}<div class="spacer"></div>${editBtn}${delBtn}`;
 
   return `
-  <article class="card ${r.status}" data-id="${r.id}" data-status="${r.status}" data-qnote="${escapeHtml(r.qualityNote)}" data-note="${escapeHtml(r.note || '')}" data-auto="${r.unattended ? '1' : '0'}">
+  <article class="card ${r.status}" data-id="${r.id}" data-status="${r.status}" data-qnote="${escapeHtml(r.qualityNote)}" data-note="${escapeHtml(r.note || '')}" data-auto="${r.unattended ? '1' : '0'}" data-dm="${r.danmaku ? '1' : '0'}">
     <div class="chead">
       ${statusHtml}
       <div class="spacer"></div>
@@ -540,6 +557,7 @@ function patchRoom(snap) {
     (card.dataset.qnote || '') !== view.qualityNote ||
     (card.dataset.note || '') !== view.note ||
     (card.dataset.auto || '1') !== (view.unattended ? '1' : '0') ||
+    (card.dataset.dm || '1') !== (view.danmaku ? '1' : '0') ||
     (card.querySelector('.dm') !== null) !== (view.status === 'recording' || Number(view.danmakuCount) > 0);
 
   if (needRerender) {
@@ -627,6 +645,17 @@ $('#grid').addEventListener('click', async ev => {
     const open = box.classList.toggle('open');
     if (open) { S.dmOpen.add(rid); box.querySelector('.dm-list').scrollTop = 1e6; }
     else { S.dmOpen.delete(rid); }
+    return;
+  }
+
+  // 卡片标签里的「弹幕 / 无弹幕」：每张卡独立决定要不要录弹幕
+  const dmBtn = ev.target.closest('[data-act="dm"]');
+  if (dmBtn) {
+    const card = dmBtn.closest('.card');
+    const rid = String(card.dataset.id);
+    const room = S.rooms.find(r => String(r.id) === rid) || {};
+    dmBtn.disabled = true;
+    await toggleRoomDanmaku(rid, room.danmaku === false);
     return;
   }
 
@@ -893,8 +922,8 @@ function detect(url, force) {
 $('#mask .modal input').addEventListener('input', ev => detect(ev.target.value));
 
 $('#btn-close').onclick = closeMask;
-$('#btn-cancel').onclick = closeMask;
-mask.addEventListener('click', ev => { if (ev.target === mask) closeMask(); });
+// 只允许右上角的 ✕ 关闭：点遮罩不再关闭（免得编辑到一半误触就把内容丢了），
+// 底部的「取消」按钮也随 index.html 一起去掉了。
 
 optRows().forEach((row, idx) => {
   const sw = $('.sw', row);
@@ -992,8 +1021,7 @@ async function runCookieCheck(platform, wrap) {
     if (wrap.isConnected) {
       paintCookieChip(platform, res);
     }
-    pushLocalLog(res.state === 'login' ? 'SUCCESS' : (res.ok === false ? 'WARN' : 'INFO'),
-      `${label} Cookie 检测：${res.message || '无结果'}`);
+    // 运行日志由后端统一记一条（server.py 的 /api/cookie-check），这里不再重复写。
   } catch (err) {
     const fail = { state: 'network', message: `检测请求失败：${err.message}` };
     S.cookieState[platform] = fail;
@@ -1044,6 +1072,8 @@ function openSettings() {
           <select data-st="saveFormat">${FORMATS.map(([v, l]) => `<option value="${v}" ${st.saveFormat === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
         <label class="fld" style="grid-column:1/-1"><span>录制保存路径（留空 = 程序目录下 downloads）</span>
           <input data-st="saveRoot" value="${escapeHtml(st.saveRoot || '')}" placeholder="downloads" spellcheck="false"></label>
+        <label class="fld" style="grid-column:1/-1"><span>弹幕保存路径（留空 = 跟随每场录像目录下的 danmaku/）</span>
+          <input data-st="danmakuRoot" value="${escapeHtml(st.danmakuRoot || '')}" placeholder="留空则跟随视频目录" spellcheck="false"></label>
         <label class="fld"><span>循环检测间隔（秒）</span>
           <input data-st="loopInterval" type="number" min="10" value="${st.loopInterval || 300}"></label>
         <label class="fld"><span>开播检测间隔（无人值守，秒）</span>
@@ -1071,7 +1101,6 @@ function openSettings() {
     <div class="mfoot">
       <span style="color:#5b6579;font-size:12px">保存后立即生效，正在录制的房间不受影响</span>
       <div style="display:flex;gap:10px">
-        <button class="btn" data-close="1">取消</button>
         <button class="btn accent" data-save="1">保存设置</button>
       </div>
     </div>
@@ -1080,9 +1109,9 @@ function openSettings() {
 
   const close = () => wrap.remove();
   wrap.addEventListener('click', ev => {
-    if (ev.target === wrap || ev.target.closest('[data-close]')) close();
+    // 只认右上角的 ✕：点遮罩、按 Esc 都不关闭，避免填了一半的 Cookie 丢失。
+    if (ev.target.closest('.mhead .x')) close();
   });
-  wrap.addEventListener('keydown', ev => { if (ev.key === 'Escape') close(); });
 
   $$('[data-ckbtn]', wrap).forEach(btn => {
     btn.onclick = () => runCookieCheck(btn.dataset.ckbtn, wrap);
@@ -1112,11 +1141,11 @@ function openSettings() {
       } catch (_) { /* 忽略：下一次 /api/state 还会刷新 */ }
 
       close();
-      pushLocalLog('INFO', '全局设置已保存');
       renderFooter();
       renderAll();
 
-      // 刚保存过 cookie 的平台，顺手检测一次（用已保存的这份）
+      // 刚保存过 cookie 的平台，顺手检测一次（用已保存的这份）。
+      // 日志统一由后端记（保存一条 + 每个平台检测一条），这里不再重复写。
       const savedKeys = Object.keys(cookies);
       if (savedKeys.length) {
         savedKeys.forEach(async platform => {
@@ -1124,8 +1153,6 @@ function openSettings() {
           try {
             const chk = await api('/api/cookie-check', { method: 'POST', body: { platform } });
             S.cookieState[platform] = chk;
-            pushLocalLog(chk.state === 'login' ? 'SUCCESS' : (chk.ok === false ? 'WARN' : 'INFO'),
-              `${CK_LABEL[platform] || platform} Cookie 检测：${chk.message}`);
           } catch (err) {
             S.cookieState[platform] = { state: 'network', message: `检测失败：${err.message}` };
           }
@@ -1163,14 +1190,20 @@ function injectStyle() {
   .ibtn.armed{color:#ff4d5e;border-color:#5c2029;background:#2a1116}
   .ibtn:disabled{opacity:.5;cursor:default}
   /* 卡片上的无人值守开关：默认灰=手动，开启为绿色=自动 */
-  .tag.auto{display:inline-flex;align-items:center;gap:5px;cursor:pointer;
+  .tag.auto,
+  .tag.dm{display:inline-flex;align-items:center;gap:5px;cursor:pointer;
     background:transparent;border:1px solid #242b3a;color:#8b95a8;font-family:inherit;
     transition:color .15s,border-color .15s,background .15s}
-  .tag.auto:hover{border-color:#33405a;color:#c6d0e2}
-  .tag.auto .autodot{width:6px;height:6px;border-radius:50%;background:#5a6376;transition:.15s}
+  .tag.auto:hover,
+  .tag.dm:hover{border-color:#33405a;color:#c6d0e2}
+  .tag.auto .autodot,
+  .tag.dm .autodot{width:6px;height:6px;border-radius:50%;background:#5a6376;transition:.15s}
   .tag.auto.on{color:#5fd3b6;border-color:#1f4a45;background:rgba(49,208,170,.08)}
   .tag.auto.on .autodot{background:#31d0aa;box-shadow:0 0 0 3px rgba(49,208,170,.14)}
-  .tag.auto:disabled{opacity:.5;cursor:default}
+  .tag.dm.on{color:#7fb2ff;border-color:#26405f;background:rgba(91,157,255,.08)}
+  .tag.dm.on .autodot{background:#5b9dff;box-shadow:0 0 0 3px rgba(91,157,255,.14)}
+  .tag.auto:disabled,
+  .tag.dm:disabled{opacity:.5;cursor:default}
   #settings-mask .ckfld{grid-column:1 / -1}
   #settings-mask .ckfld > span{display:flex;align-items:center;gap:8px}
   #settings-mask .ckfld .ckbtn{flex:0 0 auto}

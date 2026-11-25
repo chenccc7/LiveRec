@@ -60,10 +60,12 @@ def _start_hls_proxy(url: str, platform: str, room_url: str = "",
         # 虎牙的 wsSecret 是「一次一签」的：播放列表每刷新一次都要重算，否则第二次就 403
         signer = None
         if platform == "huya":
+            from . import huya as huya_mod  # noqa: PLC0415 - 虎牙实现在独立模块
+
             def signer(candidate: str) -> str:  # noqa: F811
                 # 每次刷新播放列表都要一条新签的地址（虎牙签名几十秒就过期）
-                fresh = resolver._huya_fresh_line(room_url, candidate, cookie, proxy_addr)  # noqa: SLF001
-                return fresh or resolver._huya_resign(candidate) or candidate  # noqa: SLF001
+                fresh = huya_mod.fresh_line(room_url, candidate, cookie, proxy_addr)
+                return fresh or huya_mod.resign(candidate) or candidate
 
         proxy = HlsProxy(url, headers, signer=signer)
         proxy.start()
@@ -95,6 +97,7 @@ class RecordTask:
         # 虎牙会在 ffmpeg 自己退出（签名过期/CDN 掐断）时按分片续录。
         # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
         self._huya_streak = 0
+        self._no_data = False
         self._chunk_index = 0
         self._parts: list[str] = []
         self.error = ""
@@ -189,6 +192,7 @@ class RecordTask:
         self.quality_actual = ""
         self._quality_checked = False
         self._base_bytes = 0
+        self._no_data = False
         self._huya_streak = 0
         self._chunk_index = 0
         self._parts: list[str] = []
@@ -293,7 +297,9 @@ class RecordTask:
                 if self.platform == "huya":
                     # 虎牙的 wsSecret 只有 20–30 秒有效期，分片续录必须重新拿地址，
                     # 否则会一直复用缓存里那条已经过期的 URL（表现就是「录着录着停住」）。
-                    resolver.drop_cache(self.url)
+                    from . import huya as huya_mod  # noqa: PLC0415
+
+                    huya_mod.drop_cache(self.url)
                     try:
                         from . import huya_ytdlp  # noqa: PLC0415
 
@@ -362,13 +368,16 @@ class RecordTask:
                 effective = str(adj.get("effective") or "")
                 if effective and effective != self.quality:
                     message = str(adj.get("note") or "")
+                    # 不管平台叫法是否不同，都把「实际要用的档位」写回 self.quality：
+                    # snapshot() 里的 quality 就是卡片上显示的档位，必须与真正解析用的档位一致。
+                    self.quality = effective
+                    self.quality_actual = effective
                     if message:
-                        # 真的换了档（房间没这个档位）才在卡片上标「实际画质」；
+                        # 真的换了档（房间没这个档位才降级）才在卡片上标「降级」原因；
                         # 只是平台叫法不同（原画 vs 原画（蓝光30M））就静默用真实档位去解析。
-                        self.quality_actual = effective
                         self.quality_note = message
-                        self.push(force=True)
                         log("INFO", f"{self.anchor or self.url} {message}")
+                    self.push(force=True)
                     try:
                         changed = await resolver.resolve(
                             self.url, effective,
@@ -384,6 +393,17 @@ class RecordTask:
             await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
+            if self._no_data:
+                # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
+                self._no_data = False
+                interval = cfg.check_interval()
+                self.status = "waiting"
+                self.error = ""
+                self.next_check_at = time.time() + interval
+                self.push(force=True)
+                log("INFO", f"{self.anchor or self.url} 回到等待开播，{interval}s 后重新检测")
+                await self._wait(interval)
+                continue
             if self.platform == "huya" and self.size > self._base_bytes:
                 # 虎牙签名几十秒就过期，ffmpeg 每次都会在过期点正常退出（rc 0）。
                 # 只要这一段真的录到了东西，就按分片边界处理：记下已录字节，重新解析
@@ -438,6 +458,7 @@ class RecordTask:
     # ---------- 单次录制 ----------
     async def _record_once(self, stream_url: str, lines: list[str] | None = None) -> None:
         cfg = self.cfg
+        self._no_data = False
         fmt = cfg.save_format()
         split = cfg.split_enabled()
         split_time = cfg.split_seconds()
@@ -466,10 +487,10 @@ class RecordTask:
             # 等这场直播结束再拼接、按用户选的格式转一次。
             ext = "flv"
             chunk_fmt = "flv"
+        # 只保留一条线路：虎牙的多线路里大部分是 403 的死线路，其它平台给的第一条
+        # 就是正片线路。线路没数据就直接回等待开播，不再「换下一条试试」——
+        # 那样只会让卡片看起来一直在录、实际什么都没录进去。
         candidates: list[str] = [stream_url]
-        for alt in lines or []:
-            if alt and alt not in candidates:
-                candidates.append(alt)
 
         def make_pattern(index: int) -> str:
             # 每条候选线路用独立文件名：否则后一条线路重开会把前一条已录的数据覆盖掉，
@@ -548,11 +569,12 @@ class RecordTask:
                         f"（{self.resolution or '-'} {self.bitrate or '-'}，"
                         f"已录 {int(self.elapsed)} 秒）",
                     )
-                # 一条线路迟迟一个字节都没有：死线路（403/秒断/挂住），直接换下一条。
-                # 虎牙的线路一开拉就出数据，等 8 秒足够；其它平台给 20 秒（起播慢的 CDN 不少）。
+                # 一个字节都没出：这条线路就是死的（403/秒断/挂住），
+                # 直接结束这一段，回到「等待开播」，不换线路、也不报错。
                 first_wait = 8.0 if self.platform == "huya" else 20.0
                 if self.size <= 0 and time.time() - attempt_started > first_wait:
-                    log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} {int(first_wait)} 秒无数据，切换线路")
+                    self._no_data = True
+                    log("WARN", f"{anchor} {int(first_wait)} 秒没有收到任何数据，回到等待开播")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -585,17 +607,12 @@ class RecordTask:
             # 这一段已经落盘（哪怕是被 CDN 掐断的），记下来供收尾时拼接
             if chunk_bytes > 0:
                 self._remember_part()
-            # 虎牙的分片很小（3 个分片 ≈ 1.4MB、3 秒就 EOF），阈值按「有数据」来判，
-            # 不能再用 2MB/20 秒，否则每段都被当成失败、不断换线。
-            # 注意：只要这一段真的写进了 512KB 以上，就说明线路是活的——
-            # ffmpeg 被我们主动 terminate 时 rc 不是 0，不能因此判成「未出数据」。
+            # 只有一条线路，录到了就继续（虎牙走分片续录），没录到就回等待开播。
             healthy = chunk_bytes > 512 * 1024 or (code in (0, None) and self.elapsed >= 20)
-            if healthy or self._stop.is_set() or index == len(candidates) - 1:
-                break
-            # 这条线路一个字节都没出（虎牙/斗鱼的 CDN 会秒断），换下一条重试
-            if chunk_bytes <= 0:
-                log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} 未出数据，尝试下一条")
-            self._discard_empty_files(out_dir, prefix)
+            if chunk_bytes <= 0 and not self._stop.is_set():
+                self._no_data = True
+                self._discard_empty_files(out_dir, prefix)
+            break
 
         if self.platform != "huya":
             # 虎牙是「分片续录」：一段签到期就重开一段，弹幕要跨段连着，
@@ -603,7 +620,14 @@ class RecordTask:
             await self._stop_danmaku()
         if self._stop.is_set():
             return
-        if not healthy:
+        if self._no_data:
+            # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
+            self.status = "waiting"
+            self.error = ""
+            self.note = "这条线路没有出数据，已回到等待开播（下播/风控/地址失效都会这样）"
+            self.next_check_at = time.time() + self.cfg.check_interval()
+            log("INFO", f"{anchor} 已回到等待开播，{self.cfg.check_interval()} 秒后重新检测")
+        elif not healthy:
             tail = " | ".join(self._last_error_lines[-3:]) or "所有线路均无法拉流"
             self.status = "error"
             self.error = tail[:300]
@@ -892,6 +916,7 @@ class RecordTask:
             self._dm_session = DanmakuSession(
                 client, self.platform, self.url, self.anchor or self.url,
                 video_dir, self.room_id, self._on_danmaku,
+                danmaku_dir=self.cfg.danmaku_root(),
             )
             self.session_id = self._dm_session.session_id
             await self._dm_session.start()
