@@ -838,7 +838,7 @@ class RecordTask:
             ok, message = await loop.run_in_executor(
                 None, concat.merge_session, parts, out, False, target_fmt)
             log("INFO" if ok else "WARN",
-                f"{self.anchor or self.url} 停止后已合并 {len(parts)} 个分段 → "
+                f"{self.anchor or self.url} 已合并 {len(parts)} 个分段 → "
                 f"{os.path.basename(out)}（{message or 'ok'}）")
         else:
             threading.Thread(
