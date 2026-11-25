@@ -1,5 +1,8 @@
 # LiveRec 控制台
 
+抖音 / B站 / 斗鱼 多房间直播录制 + 弹幕采集（虎牙录制暂时下线），单文件 exe，内置 ffmpeg。
+
+![主界面：多房间同时录制，每张卡片带弹幕与自动/手动开关](docs/screenshot-main.png)
 
 ## 功能
 
@@ -111,11 +114,19 @@ ffmpeg 解析相对 URI 时会丢掉 playlist 上的签名 query（`expires/sign
 
 > 窗口用 Edge/Chrome 的 `--app` 无地址栏模式打开（Win10/11 自带 Edge，无需额外安装）。
 
+启动画面（分阶段进度条，服务就绪后自动切到控制台）：
+
 ![启动画面](docs/screenshot-splash.png)
 
-![卡片上的自动/手动开关](docs/screenshot-auto.png)
+「添加直播间」：粘贴链接后自动识别平台/主播/开播状态，画质下拉换成这个房间的真实档位：
 
-![托盘常驻运行](docs/screenshot-tray.png)
+![添加直播间](docs/screenshot-add.png)
+
+每张卡片右上角两个独立开关——绿「自动」= 下次启动自动监测、灰「手动」= 保持待机；蓝「弹幕」= 这场是否采弹幕：
+
+![卡片上的自动/弹幕开关](docs/screenshot-main.png)
+
+托盘常驻：关掉窗口录制照常继续，右键托盘图标可以唤回控制台 / 全部开始 / 全部停止 / 打开录制目录 / 切换无人值守 / 退出。
 
 ### 用源码
 
@@ -166,9 +177,13 @@ data/
 
 界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 `bin/ffmpeg.exe`）**、循环检测间隔（秒）、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、代理开关与地址、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
 
+![全局设置：保存路径 / 弹幕路径 / ffmpeg 路径 / 检测间隔 / 代理 / 四平台 Cookie](docs/screenshot-settings.png)
+
 ### 自定义 ffmpeg
 
 设置里「ffmpeg 路径」填 `ffmpeg.exe` 的完整路径（例如 `D:\tools\ffmpeg\bin\ffmpeg.exe`），留空就回到内置那份：
+
+![ffmpeg 路径与当前生效值](docs/screenshot-ffmpeg.png)
 
 - 保存时会校验文件是否存在，填错直接报错、不会写入配置（免得所有录制突然全失败）；
 - 立即生效——**新开始/新续段**的录制会用新路径，已经在跑的进程不会被重启（停止再开始即可切换）；
