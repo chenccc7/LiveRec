@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import os
 import socket
 import sys
@@ -144,8 +145,23 @@ def find_running_instance(start: int = 8765, end: int = 8795) -> str | None:
     return None
 
 
+def _enable_faulthandler() -> None:
+    try:
+        import liverec.paths as _paths
+        log_dir = _paths.log_dir()
+    except Exception:
+        log_dir = "."
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        fh = open(os.path.join(log_dir, "crash.log"), "a", buffering=1)
+        faulthandler.enable(file=fh, all_threads=True)
+    except Exception:
+        pass
+
+
 def main() -> int:
     _ensure_streams()
+    _enable_faulthandler()
     parser = argparse.ArgumentParser(description="LiveRec 控制台")
     parser.add_argument("--port", type=int, default=0, help="监听端口（默认自动挑选）")
     parser.add_argument("--headless", action="store_true", help="只跑服务，不开窗口")
