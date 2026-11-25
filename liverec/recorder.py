@@ -692,6 +692,13 @@ class RecordTask:
         blocking=True 时当场（在 executor 里）拼完再返回——用户点「停止录制」
         就是这条路，停止后马上能在目录里看到合好的完整文件。
         """
+        # 只有这一场真的结束才合并。录制中途（虎牙签名到期续段）若合并，
+        # 会删掉 ffmpeg 还在引用的分段，下一条续段就只剩
+        # 「分段文件不存在，跳过拼接记录」，录制循环卡在收尾而不重开。
+        if (not self._stop.is_set() and self._loop_task is not None
+                and not self._loop_task.done() and self.status == "recording"):
+            log("INFO", f"{self.anchor or self.url} 录制中，分段先留着，等这一场结束再合并")
+            return
         parts = [p for p in self._parts if os.path.isfile(p)]
         self._parts = []
         if self.platform != "huya":
