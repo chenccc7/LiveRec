@@ -994,6 +994,7 @@ def _blocking_resolve(
     proxy: str,
     semaphore: threading.Semaphore | None = None,
     quality_raw: str = "",
+    probe: bool = True,
 ) -> dict[str, Any]:
     """在线程中执行；解析全部走内置实现，不再依赖上游 core.src。
 
@@ -1009,7 +1010,8 @@ def _blocking_resolve(
         if platform == "douyin":
             info = _resolve_douyin(url, quality_code, cookie, proxy)
         elif platform == "huya":
-            info = _resolve_huya(url, quality_raw or quality_code, cookie, proxy)
+            info = _huya_module().resolve(url, quality_raw or quality_code, cookie, proxy,
+                                          probe=probe)
         elif platform == "douyu":
             info = _resolve_douyu(url, _name_to_quality(quality_raw) or quality_code, cookie, proxy)
         elif platform == "bilibili":
@@ -1057,6 +1059,7 @@ async def resolve(
     cookie: str = "",
     proxy: str = "",
     semaphore: threading.Semaphore | None = None,
+    probe: bool = True,
 ) -> dict[str, Any]:
     """异步门面：返回 {is_live, anchor_name, title, record_url, platform, error}。"""
     from .config import QUALITY_CODES
@@ -1072,7 +1075,7 @@ async def resolve(
     code = QUALITY_CODES.get(quality_zh, "OD")
     try:
         info = await asyncio.to_thread(_blocking_resolve, url, platform, code, cookie, proxy,
-                                       semaphore, quality_zh)
+                                       semaphore, quality_zh, probe)
     except Exception as exc:  # 解析失败只影响该房间
         msg = str(exc) if getattr(exc, "user_facing", False) else f"{type(exc).__name__}: {exc}"
         return {"is_live": False, "platform": platform, "anchor_name": "", "title": "",

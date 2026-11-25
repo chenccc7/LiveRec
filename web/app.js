@@ -450,7 +450,6 @@ function renderCard(r0) {
     <div class="dm ${S.dmOpen.has(String(r.id)) ? 'open' : ''}">
       <div class="dm-head">
         <span>弹幕</span>
-        <span style="font-variant-numeric:tabular-nums" data-f="dmcount">${fmtNum(dmCount)} 条</span>
         <span class="t" style="color:#5b6579;font-size:11px">${DM_TEXT[dmStatus] || ''}</span>
         ${dmOn ? '<span class="live"><i></i>LIVE</span>' : ''}
         <span class="chev">${svg(ICON.chev, 13)}</span>
@@ -560,7 +559,6 @@ function patchRoom(snap) {
   set('[data-f="size"]', view.sizeText);
   set('[data-f="bitrate"]', view.bitrateText);
   set('[data-f="res"]', view.resText);
-  set('[data-f="dmcount"]', `${fmtNum(view.danmakuCount)} 条`);
   const segEl = card.querySelector('[data-f="seg"]');
   if (segEl) segEl.textContent = view.status === 'recording'
     ? `${Math.max(1, view.segments || 1)} 个`
@@ -598,24 +596,6 @@ function onDanmaku(evt) {
     list.insertAdjacentHTML('beforeend', dmNode(S.dm[rid][S.dm[rid].length - 1]));
     while (list.children.length > 40) list.removeChild(list.firstChild);
     list.scrollTop = list.scrollHeight;
-  }
-  const countEl = card.querySelector('[data-f="dmcount"]');
-  const room = S.rooms.find(r => String(r.id) === rid);
-  const base = Number(room && room.danmakuCount) || 0;
-  if (countEl) countEl.textContent = `${fmtNum(Math.max(base, S.dm[rid].length))} 条`;
-}
-
-async function loadAllDanmaku() {
-  for (const room of S.rooms) {
-    const rid = String(room.id);
-    if (S.dm[rid] && S.dm[rid].length) continue;
-    try {
-      const res = await api(`/api/danmaku/${rid}?limit=40`);
-      S.dm[rid] = res.items || [];
-      const card = $(`.card[data-id="${rid}"]`);
-      const list = card && card.querySelector('[data-f="dmlist"]');
-      if (list) list.innerHTML = dmNodes(rid);
-    } catch (_) { /* 忽略单房间失败 */ }
   }
 }
 

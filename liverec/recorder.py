@@ -315,6 +315,7 @@ class RecordTask:
                         self.quality,
                         cookie=cfg.cookie(self.platform),
                         proxy=cfg.proxy_for(self.platform),
+                        probe=self.platform != "huya",
                     ),
                     timeout=75,
                 )
@@ -814,9 +815,7 @@ class RecordTask:
             cmd += ["-headers", "Referer: https://live.douyin.com/\r\n"]
         elif self.platform == "huya":
             cmd += ["-headers", "Referer: https://m.huya.com/\r\nOrigin: https://m.huya.com\r\n"]
-            # 照 stream-rec：虎牙用 -xerror 让「拉不动」立刻失败（交给上层换新签名续录），
             # 而不是挂着等超时；skip_frame/drop_changed 只在解码层生效，不影响 -c copy。
-            cmd += ["-xerror", "-skip_frame:v", "nokey", "-flags:v", "+drop_changed"]
         cmd += [
             "-i", stream_url,
             "-bufsize", "8000k", "-max_muxing_queue_size", "1024",
