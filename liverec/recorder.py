@@ -602,8 +602,8 @@ class RecordTask:
                 # 这不是「停录」，而是换一条新签名的地址接着录（每段单独落文件），
                 # 否则 ffmpeg 会挂在那里不动、卡片一直显示「录制中」但体积不变。
                 if (self.platform == "huya" and self.size > self._base_bytes
-                        and time.time() - self._last_growth > 20.0):
-                    log("WARN", f"{anchor} 这 20 秒没有再写入数据（虎牙签名到期），换新地址接着录")
+                        and time.time() - self._last_growth > 8.0):
+                    log("WARN", f"{anchor} 这 8 秒没有再写入数据（虎牙签名到期），换新地址接着录")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -679,22 +679,39 @@ class RecordTask:
             pass
 
     def _remember_part(self) -> None:
-        """把刚录完的那一段记下来，等这场直播结束统一拼接成一个文件。"""
+        """把刚录完的那一段记下来，等这场直播结束统一拼接成一个文件。
+
+        ffmpeg 有时还没建出文件就退出了（5XX / 秒退），此时 current_file 指向的
+        文件名并不存在；这种情况按「同前缀的最新真实文件」兜底，别记一条幽灵分段。
+        """
         name = self.current_file
-        if not name:
+        path = os.path.join(self.out_dir, name) if name else ""
+        if not path or not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            stem = re.sub(r"_\d+\.(ts|mkv|flv|mp4)$", "", name or "")
+            candidates = []
+            if stem and os.path.isdir(self.out_dir):
+                for entry in os.listdir(self.out_dir):
+                    if not entry.startswith(stem):
+                        continue
+                    full = os.path.join(self.out_dir, entry)
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        continue
+                    if size > 0:
+                        candidates.append((os.path.getmtime(full), full, size))
+            if not candidates:
+                if name:
+                    log("WARN", f"{self.anchor or self.url} 这一段没有生成文件（ffmpeg 提前退出），跳过")
+                return
+            _, path, size = max(candidates)
+        else:
+            size = os.path.getsize(path)
+        if path in self._parts:
             return
-        path = os.path.join(self.out_dir, name)
-        if not os.path.isfile(path):
-            log("WARN", f"{self.anchor or self.url} 分段文件不存在，跳过拼接记录：{name}")
-            return
-        size = os.path.getsize(path)
-        if size <= 0:
-            log("WARN", f"{self.anchor or self.url} 分段是空文件，跳过拼接记录：{name}")
-            return
-        if path not in self._parts:
-            self._parts.append(path)
-            log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
-                        f"（{_fmt_size(size)}）：{name}")
+        self._parts.append(path)
+        log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
+                    f"（{_fmt_size(size)}）：{os.path.basename(path)}")
 
     async def _finish_session(self, blocking: bool = False) -> None:
         """这场直播结束时，把虎牙的分段拼成一个完整文件。

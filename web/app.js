@@ -224,6 +224,26 @@ async function refreshState() {
   }
 }
 
+/* 打开程序/刷新状态时，把各房间已有的弹幕历史拉回来填进抽屉 */
+async function loadAllDanmaku() {
+  for (const r of S.rooms) {
+    const rid = String(r.id);
+    try {
+      const res = await api(`/api/danmaku/${rid}?limit=40`);
+      const items = (res && (res.items || res.events)) || (Array.isArray(res) ? res : []);
+      if (!items.length) continue;
+      S.dm[rid] = items.slice(-200).map(it => ({
+        type: it.type, nickname: it.nickname, content: it.content,
+        giftName: it.gift_name || it.giftName, giftCount: it.gift_count || it.giftCount,
+        offsetMs: it.offset_ms || it.offsetMs
+      }));
+    } catch (err) {
+      /* 单个房间拉历史失败不影响其它房间 */
+    }
+  }
+  renderAll();
+}
+
 function mergeRooms(list) {
   list.forEach(snap => {
     const idx = S.rooms.findIndex(r => String(r.id) === String(snap.id));

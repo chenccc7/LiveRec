@@ -287,28 +287,14 @@ class Manager:
         return count
 
     async def resume_unattended(self) -> int:
-        """无人值守：启动时只恢复「自己开着无人值守」的房间。"""
-        count = 0
-        skipped = 0
-        for rid in list(self._order):
-            room = self.meta.get(rid) or {}
-            if resolver.platform_disabled_reason(resolver.detect_platform(room.get("url", ""))):
-                skipped += 1
-                continue
-            if not room.get("enabled", True):
-                continue
-            if not room.get("unattended", bool(self.unattended)):
-                continue
-            await self.start_room(rid)
-            count += 1
-        if skipped:
-            log("INFO", f"{skipped} 个房间所属平台已下线（虎牙），启动时跳过")
-        if count:
-            log("INFO", f"无人值守已启动，{count} 个直播间进入开播监测"
-                        f"（每 {self.cfg.check_interval()}s 检测一次）")
-        else:
-            log("INFO", "没有任何直播间开启无人值守，启动后不会自动开始监测")
-        return count
+        """卡片上的「自动/手动」开关已移除，这里不再自动开录任何房间。
+
+        保留方法是为了兼容旧调用点与托盘菜单；真实行为是「什么都不做」。
+        """
+        if any(True for _ in ()):
+            pass
+        return 0
+
 
     async def set_room_unattended(self, rid: str, enabled: bool) -> dict[str, Any]:
         """单卡片无人值守开关：立即落盘，开启时顺便把该房间拉起来。"""
