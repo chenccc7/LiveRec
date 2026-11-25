@@ -165,6 +165,9 @@ _MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKi
 _ANDROID_UA = ("Mozilla/5.0 (Linux; Android 5.0; SM-G900P Build/LRX21T) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/75.0.3770.100 Mobile Safari/537.36 ")
 _DOUYU_DID = "10000000000000000000000000001501"
+# getEncryption / getH5PlayV1 这条链只认 PC UA + www 域名。
+_DOUYU_PC_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 
 def _proxies(proxy: str) -> dict | None:
@@ -197,6 +200,7 @@ def _douyu_hls_preview(rid: str, cookie: str, proxy: str) -> tuple[int, str, str
 
     返回 (error, rtmp_url, rtmp_live, msg)；error=0 时 rtmp_url + rtmp_live 就是可用流。
     它不需要 ub98484234 那套 JS 签名，因此也不再依赖 Node/execjs。
+    注意：这条接口只下发房间最高码率的一条流，rate/画质参数无效。
     """
     import hashlib  # noqa: PLC0415
     import time  # noqa: PLC0415
@@ -223,7 +227,90 @@ def _douyu_hls_preview(rid: str, cookie: str, proxy: str) -> tuple[int, str, str
             str(info.get("rtmp_live") or ""), str(body.get("msg") or ""))
 
 
-def _douyu_stream_url(rid: str, cookie: str, proxy: str) -> str:
+_DOUYU_GUEST_DID = "10000000000000000000000000003306"
+_DOUYU_RATE = {"OD": "0", "BD": "3", "UHD": "2", "HD": "2", "SD": "1", "LD": "1"}
+
+
+def _douyu_h5play(rid: str, rate: str, cookie: str, proxy: str) -> tuple[int, str, str]:
+    """斗鱼 getEncryption + getH5PlayV1：能按 rate 拿到对应码率的流。
+
+    这套签名链是从 utlived-app 的 douyu.go 移植的：
+    `auth` = rand_str 迭代 md5(enc_time 次) 后再拼 key(+roomID+ts)。
+    返回 (error, url, msg)。
+    """
+    import hashlib  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    import requests  # noqa: PLC0415
+
+    did = _DOUYU_GUEST_DID
+    headers = {
+        "User-Agent": _DOUYU_PC_UA,
+        "Referer": f"https://www.douyu.com/{rid}",
+        "Accept": "application/json, text/plain, */*",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+
+    enc = requests.get(
+        "https://www.douyu.com/wgapi/livenc/liveweb/websec/getEncryption",
+        params={"did": did}, headers=headers,
+        proxies=_proxies(proxy), timeout=20).json()
+    data = enc.get("data") or {}
+    rand_str = str(data.get("rand_str") or "")
+    key = str(data.get("key") or "")
+    if not rand_str or not key:
+        return -1, "", "斗鱼签名接口没返回 rand_str/key"
+
+    ts = int(_time.time())
+    auth = rand_str
+    for _ in range(int(data.get("enc_time") or 0)):
+        auth = hashlib.md5((auth + key).encode()).hexdigest()
+    tail = "" if int(data.get("is_special") or 0) == 1 else f"{rid}{ts}"
+    auth = hashlib.md5((auth + key + tail).encode()).hexdigest()
+
+    form = {
+        "enc_data": str(data.get("enc_data") or ""),
+        "tt": ts,
+        "did": did,
+        "auth": auth,
+        "cdn": "",
+        "rate": rate,
+        "hevc": "0",
+        "fa": "0",
+        "ive": "0",
+    }
+    resp = requests.post(f"https://www.douyu.com/lapi/live/getH5PlayV1/{rid}",
+                         data=form, headers=headers,
+                         proxies=_proxies(proxy), timeout=20)
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        return -1, "", f"斗鱼取流接口返回非 JSON（HTTP {resp.status_code}）"
+    err = int(body.get("error") or 0)
+    info = body.get("data") or {}
+    if err != 0 or not info:
+        return err, "", str(body.get("msg") or body.get("message") or "")
+    base = str(info.get("rtmp_url") or "")
+    live = str(info.get("rtmp_live") or "")
+    if not base or not live:
+        return -1, "", "斗鱼取流接口没返回地址"
+    url = f"{base}/{live}"
+    return 0, url, ""
+
+
+def _douyu_stream_url(rid: str, cookie: str, proxy: str, quality_code: str = "OD") -> str:
+    """优先按档位取流（getH5PlayV1 支持 rate）；失败退回「最高码率」的预览接口。"""
+    rate = _DOUYU_RATE.get(quality_code or "OD", "0")
+    error, url, msg = _douyu_h5play(rid, rate, cookie, proxy)
+    if error == 102:
+        raise ResolveError("斗鱼：房间不存在")
+    if error == 104:
+        raise ResolveError("斗鱼：主播未开播")
+    if error == 0 and url:
+        # .m3u8 换成 .flv 更利于 -c copy 直录（同 CDN 同 token 通用）
+        return re.sub(r"\.m3u8(\?|$)", r".flv\1", url)
+
     error, base, live, msg = _douyu_hls_preview(rid, cookie, proxy)
     if error == 102:
         raise ResolveError("斗鱼：房间不存在")
@@ -243,7 +330,8 @@ def _resolve_douyu(url: str, quality_code: str, cookie: str, proxy: str) -> dict
     if not data.get("is_live"):
         return data
     rid = str(data.get("room_id") or _douyu_room_id(url))
-    stream_url = _douyu_stream_url(rid, cookie, proxy)
+    stream_url = _douyu_stream_url(rid, cookie, proxy, quality_code)
+    rate = _DOUYU_RATE.get(quality_code or "OD", "0")
     result = {
         "anchor_name": data.get("anchor_name", ""),
         "is_live": True,
@@ -252,10 +340,10 @@ def _resolve_douyu(url: str, quality_code: str, cookie: str, proxy: str) -> dict
         "flv_url": stream_url,
         "record_url": stream_url,
     }
-    if quality_code and quality_code != "OD":
+    if rate not in ("0", ""):
         requested = _QUALITY_LABEL.get(quality_code, quality_code)
-        result["quality_note"] = (f"斗鱼只下发一条最高码率流，实际按原画录制"
-                                  f"（所选「{requested}」不改变码率）")
+        result["quality_actual"] = requested
+        result["quality_note"] = f"斗鱼按所选档位取流（rate={rate}，{requested}）"
     return result
 
 
@@ -851,6 +939,31 @@ def _huya_mobile_profile(room: str, cookie: str, proxy: str) -> dict[str, Any]:
     }
 
 
+def _huya_playlist_text(url: str, proxy: str) -> str:
+    """取一下播放列表的正文（200 才返回，失败给空串），用来判断是 media 还是 master。"""
+    import requests  # noqa: PLC0415
+
+    try:
+        resp = requests.get(url, headers={"User-Agent": _ANDROID_UA,
+                                          "Referer": "https://m.huya.com/"},
+                            proxies=_proxies(proxy), timeout=(5, 8), stream=True)
+        if resp.status_code != 200:
+            resp.close()
+            return ""
+        # 只读前 64KB：虎牙偶尔会回一条超长/不结束的响应，读到底会把解析卡死。
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(8192):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= 65536:
+                break
+        resp.close()
+        return b"".join(chunks).decode("utf-8", "ignore")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _huya_url_alive(url: str, proxy: str) -> bool:
     """拉一下流地址的前几百字节，确认不是 403/404 的死链。"""
     import requests  # noqa: PLC0415
@@ -952,13 +1065,24 @@ def _resolve_huya(url: str, quality_code: str, cookie: str, proxy: str) -> dict[
         candidates = [c for c in candidates if c.startswith("http")]
         if not candidates:
             raise ResolveError("虎牙未返回可用直播流（可能是付费/加密频道，或该房间已切到未支持的线路）")
-        # 各路 CDN 在同一时刻的可用性不一样（实测常是 tx 通、al/hs 403），
+        # 各路 CDN 在同一时刻的可用性不一样（实测常是 hs 通、al/tx 403），
         # 而且 wsSecret 可以本地重算，所以这里可以放心逐条「重签 + 探一下」挑出能用的那条。
+        # 优先挑「直接给分片的 media 播放列表」的线路：虎牙有些线路返回 master，
+        # 跟一跳拿到的子列表常常是 3 个分片、不滚动的死窗口，录 3 秒就 EOF。
+        media_index = -1
         for index, candidate in enumerate(candidates[:6]):
             signed = _huya_resign(candidate) or candidate
-            if _huya_url_alive(signed, proxy):
-                candidates.insert(0, candidates.pop(index))
+            if "#EXTINF" in _huya_playlist_text(signed, proxy):
+                media_index = index
                 break
+        if media_index >= 0:
+            candidates.insert(0, candidates.pop(media_index))
+        else:
+            for index, candidate in enumerate(candidates[:6]):
+                signed = _huya_resign(candidate) or candidate
+                if _huya_url_alive(signed, proxy):
+                    candidates.insert(0, candidates.pop(index))
+                    break
         pref = _huya_preferred.get(room, 0) % len(candidates)
         order = candidates[pref:] + candidates[:pref]
         result.update({"quality": quality_code, "flv_url": order[0], "record_url": order[0],
@@ -1167,7 +1291,21 @@ def _douyu_qualities(rid: str, cookie: str, proxy: str) -> list[dict[str, Any]]:
             label = f"原画（{name}）"
         items.append(_quality_item(value, label, name))
     for item in items:
-        item["note"] = "斗鱼只下发一条最高码率流，选档位不会降码率"
+        item["note"] = "斗鱼按所选档位切换码率（原画最高），录制时按档位取流"
+    # 关键：斗鱼「能选哪些档位」不取决于房间的 multirates（很多房间只标注了「蓝光10M」一条），
+    # 而是取决于 getH5PlayV1 的 rate（0=原画 / 3=蓝光 / 2=超清 / 1=流畅）。实测同一房间
+    # rate0/3/1 各录 6 秒分别是 2.4MB / 1.0MB / 0.7MB，说明档位是真的生效的。
+    # 所以这里始终补齐四档，已有同值的房间自定义名字保持不变。
+    _FIXED = [("原画", "原画（最高码率）"), ("蓝光", "蓝光"), ("超清", "超清"), ("流畅", "流畅")]
+    if not items:
+        items = [_quality_item(value, label, value) for value, label in _FIXED]
+    else:
+        have = {item.get("value") for item in items}
+        for value, label in _FIXED:
+            if value not in have:
+                items.append(_quality_item(value, label, value))
+    for item in items:
+        item["note"] = "斗鱼按所选档位切换码率（原画最高），录制时按档位取流"
     if items:
         items[0]["default"] = True
     return items
@@ -1217,8 +1355,8 @@ def _blocking_qualities(url: str, platform: str, cookie: str, proxy: str) -> dic
             info["isLive"] = bool(room_info.get("is_live"))
         except Exception:  # noqa: BLE001 - 房间信息拿不到不影响画质列表
             pass
-        info["note"] = ("斗鱼只下发一条最高码率流（即原画），档位是房间自己标注的："
-                        "选低档位也不会降码率，录制固定取最高画质")
+        info["note"] = ("斗鱼按所选档位真正切换码率（原画 / 蓝光 / 超清 / 高清 / 流畅），"
+                        "档位来自房间的 multirates；平台没给的档位不会出现在列表里")
     elif platform == "huya":
         room = _huya_room_id(url, proxy)
         data = _huya_mp_data(room, cookie, proxy)

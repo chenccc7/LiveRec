@@ -47,6 +47,11 @@ def _start_hls_proxy(url: str, platform: str, room_url: str = "",
     """m3u8 地址才需要本地中转（把分片的相对 URI 改写成带签名的绝对地址）。"""
     if ".m3u8" not in url.lower():
         return None
+    if platform == "huya":
+        # 虎牙不走中转：实测「接口新签的地址直连」能正常录（5 秒 481KB），而经中转反而
+        # 常在第一条线路就 403（中转的刷新节奏会打乱 CDN 的验签）。签名几十秒就过期，
+        # 交给外层「分片续录」每段重新解析一条新地址即可。
+        return None
     headers = {"User-Agent": UA}
     if platform == "bilibili":
         headers["Referer"] = "https://live.bilibili.com/"
@@ -272,12 +277,21 @@ class RecordTask:
         cfg = self.cfg
         while not self._stop.is_set():
             try:
-                info = await resolver.resolve(
-                    self.url,
-                    self.quality,
-                    cookie=cfg.cookie(self.platform),
-                    proxy=cfg.proxy_for(self.platform),
+                # 解析卡死会让整张卡永远停在「等待开播」且毫无日志，这里硬性限时：
+                # 虎牙的 CDN 偶尔回一条不结束的响应，线程里的 requests 会一直挂着。
+                info = await asyncio.wait_for(
+                    resolver.resolve(
+                        self.url,
+                        self.quality,
+                        cookie=cfg.cookie(self.platform),
+                        proxy=cfg.proxy_for(self.platform),
+                    ),
+                    timeout=75,
                 )
+            except asyncio.TimeoutError:
+                self._to_error("解析超时（75 秒没有结果），稍后重试")
+                await self._wait(self.cfg.check_interval())
+                continue
             except Exception as exc:
                 if getattr(exc, "user_facing", False):
                     self._to_error(str(exc))
@@ -349,14 +363,29 @@ class RecordTask:
             await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
+            if self.platform == "huya" and not self._stalled and self.size > self._base_bytes:
+                # 虎牙签名几十秒就过期，ffmpeg 每次都会在过期点正常退出（rc 0）。
+                # 只要这一段真的录到了东西，就按分片边界处理：记下已录字节，重新解析
+                # 拿新签名接着录，卡片保持「录制中」；低于阈值则交给下面的失败分支退避。
+                chunk = self.size - self._base_bytes
+                if chunk >= 300 * 1024:
+                    self._huya_streak = 0
+                    self._base_bytes = self.size
+                    self.status = "recording"
+                    self.error = ""
+                    self.note = "虎牙签名到期自动续录（每段单独成文件）"
+                    self.push(force=True)
+                    await self._wait(1.5)
+                    continue
             if self._stalled:
                 if self.platform == "huya" and self.size > 0:
                     # 虎牙：签名到期被掐断是常态，立刻换新签名续录，卡片保持「录制中」，
                     # 每段单独落一个文件（时间戳不同，不会覆盖）；已录字节要接着累计，
                     # 否则卡片上的体积会突然掉回 0。
                     segment_bytes = self.size - self._base_bytes
-                    if segment_bytes >= 1_000_000:
-                        # 这一段真的录到了东西，说明不是被限流，连续失败计数清零
+                    if segment_bytes >= 300 * 1024:
+                        # 这一段真的录到了东西（虎牙单段常见 0.5–2.5MB），
+                        # 说明不是被限流，连续失败计数清零
                         self._huya_streak = 0
                     self._huya_streak += 1
                     if self._huya_streak <= 6:
@@ -375,6 +404,7 @@ class RecordTask:
                     self._huya_streak = 0
                 # 无数据看门狗：不报错，回到等待开播；断流大多是线路被掐，
                 # 先按短间隔重试（15 秒），让换线/重连尽快生效。
+                await self._stop_danmaku()
                 interval = min(15.0, float(cfg.check_interval()))
                 self.status = "waiting"
                 self.error = ""
@@ -383,6 +413,7 @@ class RecordTask:
                 await self._wait(interval)
                 continue
             # 录制结束（主播下播/断流）：稍等再回到轮询
+            await self._stop_danmaku()
             self.status = "waiting"
             self.note = ""
             self.next_check_at = time.time() + 15
@@ -522,7 +553,11 @@ class RecordTask:
                 proxy.stop()
                 proxy = None
 
-            healthy = code in (0, None) and (self.size > 2 * 1024 * 1024 or self.elapsed >= 20)
+            # 这一段新录到的字节（要减掉之前的累计，否则第二段一开始就「健康」）
+            chunk_bytes = self.size - self._base_bytes
+            # 虎牙的分片很小（3 个分片 ≈ 1.4MB、3 秒就 EOF），阈值按「有数据」来判，
+            # 不能再用 2MB/20 秒，否则每段都被当成失败、不断换线。
+            healthy = code in (0, None) and (chunk_bytes > 512 * 1024 or self.elapsed >= 20)
             if self._stalled:
                 # 已经录到过数据但流挂了：保留已录内容，直接交给外层处理（等待开播）
                 healthy = self.size > 0
@@ -533,8 +568,10 @@ class RecordTask:
             log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} 未出数据，尝试下一条")
             self._discard_empty_files(out_dir, prefix)
 
-        await self._stop_danmaku()
-
+        if self.platform != "huya":
+            # 虎牙是「分片续录」：一段签到期就重开一段，弹幕要跨段连着，
+            # 否则卡片上的条数会随每段归零、看起来「一会大一会小」。
+            await self._stop_danmaku()
         if self._stop.is_set():
             return
         if self._stalled:
@@ -720,6 +757,9 @@ class RecordTask:
     async def _start_danmaku(self, video_dir: str) -> None:
         if not self.danmaku_enabled:
             self.danmaku_status = "off"
+            return
+        if self._dm_session is not None:
+            # 虎牙分片续录会反复进出这里，已经连着就别重开，否则计数会一会大一会小
             return
         from .danmaku import DanmakuSession, create_client
 
