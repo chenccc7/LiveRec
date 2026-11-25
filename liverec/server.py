@@ -17,7 +17,7 @@ from .config import Config
 from .logbook import LOG, FileSink, log
 from .manager import Manager, sleep_forever
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 FILE_SINK = FileSink()
 LOG.subscribe(FILE_SINK.write)
 

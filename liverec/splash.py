@@ -52,7 +52,7 @@ _HTML = """<!DOCTYPE html>
     <div class="bar"><i id="p"></i></div>
     <div class="tip" id="t">正在启动程序…</div>
   </div>
-  <div class="ver">v0.1.0 · core v4.0.7</div>
+  <div class="ver">v0.2.0 · core v4.0.7</div>
 <script>
   const p = document.getElementById('p'), t = document.getElementById('t');
   let target = 8, shown = 8, jumping = false;
