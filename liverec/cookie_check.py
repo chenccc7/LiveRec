@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -247,7 +248,8 @@ async def _check_douyin(cli: httpx.AsyncClient, parsed: dict[str, str]) -> dict[
                    "这种情况通常是接口改版，录制时仍会带着这份 Cookie 去取流。")
 
 
-async def _check_reach(cli: httpx.AsyncClient, platform: str, parsed: dict[str, str]) -> dict[str, Any]:
+async def _check_reach(cli: httpx.AsyncClient, platform: str, parsed: dict[str, str],
+                      proxy: str = "") -> dict[str, Any]:
     """斗鱼/虎牙没有公开的登录态接口：做必备字段 + 站点连通性校验。"""
     home = {"douyu": "https://www.douyu.com/", "huya": "https://www.huya.com/"}[platform]
     label = LABELS[platform]
@@ -271,14 +273,24 @@ async def _check_reach(cli: httpx.AsyncClient, platform: str, parsed: dict[str, 
         return _result(platform, "network", None, f"{label}首页返回 HTTP {r.status_code}",
                        "可能是网络或风控拦截，稍后再试。")
 
-    if logged_shape:
+    if platform == "huya":
+        # 虎牙有真正的登录态接口：udblgn 的 cookie/verify（appId=5002）
+        from liverec import huya as _huya  # noqa: PLC0415
+
+        raw_cookie = "; ".join(f"{k}={v}" for k, v in parsed.items())
+        ok, message = await asyncio.to_thread(_huya.cookie_state, raw_cookie, proxy)
+        if ok is True:
+            return _result(platform, "login", True, f"登录有效：{message}",
+                           "登录态 Cookie 能让虎牙取流更稳（匿名时常被 CDN 限流）。")
+        if ok is False:
+            return _result(platform, "expired", False, f"Cookie 已失效：{message}",
+                           "在浏览器重新登录 huya.com，再把 Cookie 整段复制过来。")
         status = (parsed.get("udb_status") or "").strip()
         hint = "（udb_status=10，登录态标记）" if status == "10" else ""
         return _result(platform, "likely", None,
                        f"检测到登录态字段：uid {uid}{hint}",
-                       "这份 Cookie 里带着登录令牌，结构上就是「已登录」；"
-                       "但虎牙没有公开的登录态查询接口，无法在线确认令牌是否过期——"
-                       "如果录制日志出现 403/鉴权失败，重新登录一次再复制 Cookie 即可。")
+                       f"udblgn 没给出明确结论（{message or '无返回码'}）；"
+                       "结构上像是已登录，但如果录制日志出现 403/鉴权失败，重新登录一次再复制 Cookie 即可。")
 
     looks_logged = bool(re.search(r"(用户中心|退出登录|个人中心)", r.text or ""))
     return _result(platform, "format", None,
@@ -324,7 +336,7 @@ async def check_cookie(platform: str, cookie: str, proxy: str = "") -> dict[str,
             elif platform == "douyu":
                 result = await _check_douyu(cli, parsed)
             else:
-                result = await _check_reach(cli, platform, parsed)
+                result = await _check_reach(cli, platform, parsed, proxy)
     except Exception as exc:  # noqa: BLE001 - 网络类错误统一兜底
         return _result(platform, "network", None, f"检测失败：{type(exc).__name__}: {exc}")
 

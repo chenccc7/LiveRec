@@ -2,6 +2,12 @@
 
 版本号规则：`v0.x.y` 递增，统一用 `git tag` 打标签；exe 只在明确要求时才上传到 GitHub Releases。
 
+## 未发布（待确认后再定版本号/tag）
+
+- 虎牙录制按 stream-rec 的做法整体重写（liverec/huya.py）：mp.huya.com 取房间信息（iPhone 微信 UA）、CDN × {flv,hls} × 码率线路矩阵、antiCode 本地重算（codec=264、u 旋转、ss）、WUP liveup.getCdnTokenInfo 兜底、udblgn Cookie 校验；录制改走本地 HLS 中转（每次刷新重签、分片过期即续段、收尾自动拼接）。
+- DISABLED_PLATFORMS 清空，虎牙重新可用；界面/README 里「虎牙已下线」的文案恢复。
+- liverec/hlsproxy.py：拉流转 erify=False（虎牙 CDN 证书链不完整）、非 URL 行与坏 URI 不再让整篇播放列表 500。
+
 ## v0.2.0（2026-11-26）
 
 本版是「七项整改 + 虎牙下线 + 自定义 ffmpeg + 抖音修复」的汇总发布。

@@ -539,7 +539,7 @@ function renderAll() {
   if (!S.rooms.length) {
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1;text-align:center;padding:64px 0;color:#5b6579;line-height:2">
       <div style="font-size:15px;color:#8b95a8">还没有添加直播间</div>
-      <div>点右上角「添加直播间」粘贴地址即可，支持抖音 / B站 / 斗鱼</div>
+      <div>点右上角「添加直播间」粘贴地址即可，支持抖音 / B站 / 斗鱼 / 虎牙</div>
     </div>`;
     return;
   }
@@ -908,7 +908,7 @@ function detect(url, force) {
         api(`/api/qualities?url=${encodeURIComponent(u)}`).then(q => {
           if (qseq !== qualitySeq) return;
           if (q && q.ok) setQualityOptions(q.qualities, q.note || '');
-          // 识别那一步已经报过错了（比如虎牙已下线），这里就不再重复同一句话
+          // 识别那一步已经报过错了（比如平台解析失败），这里就不再重复同一句话
           else setQualityOptions(null, info.error ? '' : ((q && q.error) || '未取到该直播间的可选画质，先按默认六档选择'));
         }).catch(() => {
           if (qseq === qualitySeq) setQualityOptions(null, info.error ? '' : '画质列表获取失败，先按默认六档选择');
@@ -1100,7 +1100,7 @@ function openSettings() {
           <input data-st="proxyAddr" value="${escapeHtml(st.proxyAddr || '')}" placeholder="http://127.0.0.1:7890" spellcheck="false"></label>
         ${cookieFields}
       </div>
-      <div class="hint-line">抖音 / B站 / 斗鱼的取流都已内置，弹幕三家也都可用；<b>虎牙录制已暂时下线</b>（流地址一次性失效、CDN 频繁掐断），恢复前请先录其它三个平台。「检测」只做验证、不会保存，保存请点右下角。</div>
+      <div class="hint-line">四个平台的取流与弹幕都已内置（虎牙录制在本版重新实现：多 CDN × 双格式取线路 + WUP 兜底 token + 本地 HLS 中转续签）。「检测」只做验证、不会保存，保存请点右下角。</div>
     </div>
     <div class="mfoot">
       <span style="color:#5b6579;font-size:12px">保存后立即生效，正在录制的房间不受影响</span>

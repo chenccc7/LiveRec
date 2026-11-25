@@ -80,12 +80,9 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
-# 暂时下线的平台。虎牙的流地址（wsSecret）一次性失效 + 多 CDN 频繁掐断，
-# 现阶段录不稳，先整体关掉录制支持（代码留在 liverec/huya.py 里，恢复时把这里清空即可）。
-DISABLED_PLATFORMS: dict[str, str] = {
-    "huya": "虎牙录制已暂时下线：平台流地址一次性失效、CDN 频繁掐断，暂时录不稳。"
-            "可以先用抖音 / B站 / 斗鱼。",
-}
+# 暂时下线的平台（目前为空）。要下线某个平台时在这里加一行，
+# 添加/解析/画质列表都会被挡掉，界面会显示这里的文案。
+DISABLED_PLATFORMS: dict[str, str] = {}
 
 
 def platform_disabled_reason(platform: str) -> str:

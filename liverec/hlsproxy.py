@@ -17,6 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict
 
 import requests
+import urllib3
+
+# 直播 CDN 的证书链经常不完整（虎牙的 tx.hls 就是这样），本机中转统一不校验，
+# 否则 requests 会抛 SSLError。这个中转只连「直播流地址」，不承载其它请求。
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 _URI_RE = re.compile(r'URI="([^"]+)"')
 _DEFAULT_UA = (
@@ -74,15 +79,27 @@ def _rewrite(state: _State, text: str) -> str:
         return f"{folder}/{uri}" + tail
 
     out: list[str] = []
+
+    def safe_register(uri: str) -> str:
+        """注册分片；解析不了的行原样保留（虎牙偶尔会给出带方括号的坏 URI）。"""
+        try:
+            return state.register(uri)
+        except Exception:  # noqa: BLE001 - 保住整篇播放列表比纠一条坏行重要
+            return uri
+
     for line in text.splitlines():
         if line.startswith("#"):
             match = _URI_RE.search(line)
             if match:
-                target = state.register(absolute(match.group(1)))
+                target = safe_register(absolute(match.group(1)))
                 line = line.replace(match.group(1), target)
             out.append(line)
         elif line.strip():
-            out.append(state.register(absolute(line.strip())))
+            raw = line.strip()
+            if not raw.startswith(("http://", "https://", "//", "/")) and "://" not in raw:
+                # 纯文件名/相对路径才需要拼前缀；其它形态（含非法字符）原样放行
+                pass
+            out.append(safe_register(absolute(raw)))
         else:
             out.append(line)
     return "\n".join(out) + "\n"
@@ -96,6 +113,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     # 让 ffmpeg 的 keep-alive 请求能复用
     def do_GET(self) -> None:  # noqa: N802
+        # ffmpeg 经常在分片写到一半就断开（关窗口 / 换线路 / 分段边界），
+        # 这里统一吞掉断连异常，否则 socketserver 会往 stderr 刷一大段 traceback。
+        try:
+            self._handle_get()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
+    def _handle_get(self) -> None:
         state: _State = self.server.state  # type: ignore[attr-defined]
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path in ("/live.m3u8", "/index.m3u8"):
@@ -125,7 +150,8 @@ class _Handler(BaseHTTPRequestHandler):
                 except Exception:  # noqa: BLE001 签名失败就沿用原地址
                     pass
             try:
-                resp = requests.get(candidate, headers=state.headers, timeout=state.timeout)
+                resp = requests.get(candidate, headers=state.headers, timeout=state.timeout,
+                                    verify=False)
             except Exception:  # noqa: BLE001
                 resp = None
                 continue
@@ -161,7 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except Exception:  # noqa: BLE001
                     pass
             try:
-                sub = requests.get(child, headers=state.headers, timeout=state.timeout)
+                sub = requests.get(child, headers=state.headers, timeout=state.timeout, verify=False)
             except Exception as exc:  # noqa: BLE001
                 self._fail(502, f"child error: {exc}".encode())
                 return
@@ -198,7 +224,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._playlist(view)
             return
         try:
-            resp = requests.get(target, headers=state.headers, timeout=state.timeout, stream=True)
+            resp = requests.get(target, headers=state.headers, timeout=state.timeout, stream=True, verify=False)
         except Exception as exc:  # noqa: BLE001
             self._fail(502, f"segment error: {exc}".encode())
             return

@@ -1,622 +1,817 @@
-"""虎牙直播：解析 + 录制策略（独立模块，与其它三个平台彻底分离）。
+"""虎牙直播录制实现（移植自 stream-rec 的 Huya extractor，MIT）。
 
-虎牙和其它平台不一样的地方：
-* 地址是**一次性签名**，几十秒后同一地址重签也会 403；
-* 同一房间有十几条 CDN 线路，多数 403，稳定的是 hs.hls / tx.flv；
-* 很多房间下发的 HLS 只有 3 个分片、不滚动，读完就 EOF。
+取流链路完全对照 stream-rec：`platforms/.../huya/download/HuyaExtractor*.kt`
+1. 房间信息：`mp.huya.com/cache.php?do=profileRoom&m=Live&roomid=<rid>&showSecret=1`，
+   iPhone 微信 UA；开播判定要 `realLiveStatus == "ON" and liveStatus == "ON"`，
+   并且跳过标题以「【回放】」开头的房间。
+2. 画质：`liveData.bitRateInfo`（没有就退 `stream.flv.rateArray`），
+   **首档码率取 `liveData.bitRate`**（首项的 iBitRate 常是 0），
+   再把 `sFlvAntiCode` 里 `exsphd` 携带的额外档位（HDR/杜比）合并进来；名字带 HDR 的档位跳过。
+3. 线路：`stream.baseSteamInfoList` 里每个 CDN 都拼 flv + hls 两套地址，
+   antiCode 自己算：
+       u        = ((uid << 8) | (uid >> 24)) & 0xFFFFFFFF
+       seqid    = int((int(wsTime, 16) + rand()) * 1000) + uid
+       ss       = md5(f"{seqid}|{ctype}|{platformId}")
+       wsSecret = md5(f"{fm}_{u}_{streamName}_{ss}_{wsTime}")
+   参数还要带 ctype / fs / u / t / ver=1 / uuid / sdk_sid / **codec=264**（+ ratio），
+   然后按 CDN 的 `iWebPriorityRate` 排序、按码率档位组合成候选。
+4. 兜底：算出来的地址拉不动时，stream-rec 会走 WUP
+   `POST https://wup.huya.com`（TARS `liveui.getCdnTokenInfo`，HYSDK UA）拿服务端 antiCode。
+   这里按同样的思路实现了 `wup_token()`，失败就退回自己算的那份，不影响主流程。
 
-所以这里不追求「一条长连接录到底」，而是：
-  1. `resolve()` 用 yt-dlp 的 HuyaLive 解析器拿最新签名地址（它自己算 anti-code）；
-  2. 录制端每 `CHUNK_SECONDS` 秒换一条新地址续录（`next_stream()`），每段单独成文件；
-  3. 停止录制时由 `liverec/concat.py` 把这些分段拼成一个文件。
-
-对外的入口：`resolve()` / `qualities()` / `next_stream()` / `drop_cache()`。
+与本项目其它模块的约定：
+- `resolve()` / `qualities()` / `next_stream()` / `drop_cache()` / `resign()` / `fresh_line()`
+  是 resolver 与 recorder 依赖的对外接口，签名保持不变。
+- HLS 中转（`liverec/hlsproxy.py`）每次刷新都会调 `fresh_line()` 要一条**新签**的地址。
 """
+
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import random
 import re
+import struct
 import time
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from . import paths
-from .huya_ytdlp import urls as _ytdlp_urls
-from .resolver import (  # noqa: E402 - 复用通用小工具，resolver 不会在导入期反向导入本模块
+from .resolver import (
+    ResolveError,
     _ANDROID_UA,
     _QUALITY_BITRATE,
-    ResolveError,
     _name_to_quality,
     _proxies,
     _quality_item,
 )
 
-# 每段录制时长：虎牙签名大约 20~30 秒就过期，取 28 秒能拿到最多数据又不至于中途 403。
+# 虎牙的签名地址有效期只有二三十秒，录制端按这个粒度分段续录（每段重新取一次签名）。
 CHUNK_SECONDS = 28.0
 
+MP_BASE_URL = "https://mp.huya.com/cache.php"
+WUP_URL = "https://wup.huya.com"
+COOKIE_VERIFY_URL = "https://udblgn.huya.com/web/cookie/verify"
+HY_BASE = "https://www.huya.com"
 
-def _huya_room_id(url: str, proxy: str = "") -> str:
-    """虎牙房间号：数字直接用；短名（www.huya.com/dank1ng）从移动页里取 lChannelId。
+APP_ID = 5002
+WEB_PLATFORM_ID = 100
 
-    cache.php 那套接口只认数字房间号，所以短名必须先换一次。
-    """
-    m = re.search(r"huya\.com/(?:share/)?([A-Za-z0-9_]+)", url)
-    if not m:
-        raise ResolveError("未能从链接中解析出虎牙房间号")
-    token = m.group(1)
-    if token.isdigit():
-        return token
+# stream-rec 用的两个 UA：
+# - 取房间信息走 iPhone 微信 UA（PC/安卓拿到的字段不全，且更便宜被风控）
+# - 只有 WUP 请求用 HYSDK UA（对应的版本号区间被服务端接受）
+UA_IPHONE_WX = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.49(0x18003137) "
+    "NetType/WIFI Language/zh_CN WeChat/8.0.49.33 CFNetwork/1474 Darwin/23.0.0"
+)
+HYSDK_UA = "HYSDK(Windows,30000002)_APP(pc_exe&7030003&official)_SDK(trans&2.29.0.5493)"
+
+# WUP 请求体的编码版本：stream-rec 用 TARS 的 UniAttribute，
+# v1 = map<string, bytes>，v3 = map<string, map<string, bytes>>。两种都试过，见 _wup_token()。
+_WUP_STYLE = "v1"
+
+_MP_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_MP_TTL = 2.5
+_PREFERRED: dict[str, int] = {}
+_ANTI_CACHE: dict[str, dict[str, Any]] = {}
+
+
+# --------------------------------------------------------------------------- 工具
+
+
+def _md5(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _get(url: str, headers: dict[str, str], proxy: str, timeout: float = 15.0) -> str:
     import requests  # noqa: PLC0415
 
+    resp = requests.get(url, headers=headers, proxies=_proxies(proxy), timeout=timeout)
+    resp.raise_for_status()
+    return resp.text
+
+
+def _b64(text: str) -> str:
+    text = text or ""
+    return base64.b64decode(text + "=" * (-len(text) % 4)).decode("utf-8", "replace")
+
+
+# --------------------------------------------------------------------------- 房间
+
+
+def room_id(url: str, proxy: str = "") -> str:
+    """从链接里取数字房间号；短名（dank1ng）会去页面里找 `lProfileRoom`。"""
+    match = re.search(r"huya\.com/([^/?#]+)", url or "")
+    if not match:
+        raise ResolveError("没能从链接里认出虎牙房间号，请贴 https://www.huya.com/<房间号>")
+    raw = match.group(1)
+    if raw.isdigit():
+        return raw
+    # 短名：lChannelId 是主播 uid（当房间号用会 422），真正的房间号在 lProfileRoom
     html = ""
-    try:
-        resp = requests.get(
-            f"https://m.huya.com/{token}",
-            headers={"User-Agent": _ANDROID_UA, "Referer": "https://m.huya.com/"},
-            proxies=_proxies(proxy), timeout=20)
-        resp.raise_for_status()
-        html = resp.text
-    except Exception as exc:  # noqa: BLE001
-        raise ResolveError(f"虎牙短名解析失败（{token}）：{exc}") from exc
-    # 页面里的 lChannelId 是主播 uid，不是房间号；房间号在 lProfileRoom（详见 tLiveProfile）。
-    for pat in (r'"lProfileRoom"\s*:\s*(\d{2,12})',
-                r'"lProfileRoom\\?"\s*:\s*(\d{2,12})',
-                r'"lSid"\s*:\s*(\d{2,12})',
-                r'"roomId"\s*:\s*"(\d{2,12})"',
-                r"lChannelId\"?\s*[:=]\s*(\d{2,12})"):
-        for mm in re.finditer(pat, html):
-            if mm.group(1).strip("0"):
-                return mm.group(1)
-    raise ResolveError(f"虎牙短名解析失败（{token}）：页面里没有房间号，请改用 https://www.huya.com/<数字>")
-
-
-def _huya_stream_lines(html: str) -> list[dict[str, str]]:
-    """移动页里还有一块 tLiveStreamInfo，按 CDN 列出 sFlvUrl + sStreamName + sFlvAntiCode。
-
-    赛事/官方频道（例如 660000）没有 liveLineUrl，流地址只在这块里。
-    """
-    import json  # noqa: PLC0415
-
-    head = html.find('"tLiveStreamInfo"')
-    if head < 0:
-        return []
-    start = html.find('{"vStreamInfo"', head)
-    if start < 0:
-        return []
-    try:
-        obj, _ = json.JSONDecoder().raw_decode(html[start:])
-    except Exception:  # noqa: BLE001
-        return []
-    value = ((obj.get("vStreamInfo") or {}).get("value")) or []
-    lines: list[dict[str, str]] = []
-    for item in value:
-        if not isinstance(item, dict):
+    for page in (f"https://m.huya.com/{raw}", f"{HY_BASE}/{raw}"):
+        try:
+            html = _get(page, {"user-agent": _ANDROID_UA, "referer": HY_BASE}, proxy, 20)
+        except Exception:  # noqa: BLE001
             continue
-        cdn = str(item.get("sFlvUrl") or "")
-        name = str(item.get("sStreamName") or "")
-        suffix = str(item.get("sFlvUrlSuffix") or "flv")
-        anti = str(item.get("sFlvAntiCode") or "")
-        if not (cdn and name):
-            continue
-        if cdn.startswith("http://"):
-            cdn = "https://" + cdn[len("http://"):]
-        elif cdn.startswith("//"):
-            cdn = "https:" + cdn
-        query = f"?{anti}" if anti else ""
-        lines.append({
-            "url": f"{cdn}/{name}.{suffix}{query}",
-            "anti": anti,
-            "name": name,
-            "cdn": item.get("sCdnType") or "",
-        })
-    return lines
+        for pattern in (r'"lProfileRoom"\s*:\s*(\d{2,12})', r'"lSid"\s*:\s*(\d{2,12})',
+                        r'"roomId"\s*:\s*"?(\d{2,12})'):
+            found = re.search(pattern, html)
+            if found and int(found.group(1)) != 0:
+                return found.group(1)
+    raise ResolveError("虎牙这个主播名解析不到房间号，请改用 https://www.huya.com/<数字房间号>")
 
 
-_huya_mp_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def _huya_mp_data_cached(room: str, cookie: str, proxy: str, ttl: float = 8.0) -> dict[str, Any]:
-    """短缓存：HLS 中转每几秒刷新一次播放列表，别每次都打虎牙接口（容易被限流）。"""
+def mp_data(room: str, cookie: str, proxy: str, ttl: float | None = None) -> dict[str, Any]:
+    """`mp.huya.com` 的房间信息（stream-rec 的 isLive + extract 都走这个接口）。"""
+    ttl = _MP_TTL if ttl is None else ttl
     key = f"{room}|{len(cookie)}|{proxy}"
-    now = time.time()
-    hit = _huya_mp_cache.get(key)
-    if hit and now - hit[0] < ttl:
-        return hit[1]
-    data = _huya_mp_data(room, cookie, proxy)
-    _huya_mp_cache[key] = (now, data)
+    cached = _MP_CACHE.get(key)
+    if cached and ttl > 0 and time.time() - cached[0] < ttl:
+        return cached[1]
+
+    import requests  # noqa: PLC0415
+
+    headers = {
+        "user-agent": UA_IPHONE_WX,
+        "referer": f"{HY_BASE}/{room}",
+        "accept": "application/json, text/plain, */*",
+    }
+    if cookie:
+        headers["cookie"] = cookie
+    try:
+        resp = requests.get(MP_BASE_URL, params={
+            "do": "profileRoom", "m": "Live", "roomid": room, "showSecret": "1",
+        }, headers=headers, proxies=_proxies(proxy), timeout=20)
+    except Exception as exc:  # noqa: BLE001
+        raise ResolveError(f"虎牙接口请求失败：{type(exc).__name__}: {exc}") from exc
+
+    text = (resp.text or "").strip()
+    if not text.startswith("{"):
+        raise ResolveError("虎牙接口返回风控页面（该平台已加强反爬，稍后重试或改用代理）")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ResolveError("虎牙接口返回的不是 JSON（可能被风控）") from exc
+
+    if not isinstance(payload, dict) or payload.get("status") != 200:
+        message = (payload or {}).get("message") or ""
+        if "不存在" in message:
+            raise ResolveError(f"虎牙没找到这个房间：{message}")
+        raise ResolveError(f"虎牙接口返回异常：status={(payload or {}).get('status')} {message}")
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise ResolveError("虎牙接口没给出房间数据")
+    _MP_CACHE[key] = (time.time(), data)
     return data
 
 
-def _huya_mp_data(room: str, cookie: str, proxy: str) -> dict[str, Any]:
-    """移动端 cache 接口：一次请求拿到 liveStatus + 各 CDN 的 flv 线路 + HLS 线路。
+def is_live(data: dict[str, Any]) -> bool:
+    live_data = data.get("liveData") or {}
+    intro = str(live_data.get("introduction") or "")
+    if intro.startswith("【回放】"):  # 回放不是直播
+        return False
+    return data.get("realLiveStatus") == "ON" and data.get("liveStatus") == "ON"
 
-    PC 端 cache.php?do=profileRoom 已经被风控成验证页，移动端这个还没封。
-    """
-    import requests  # noqa: PLC0415
 
-    headers = {"User-Agent": _ANDROID_UA, "Referer": "https://m.huya.com/"}
-    if cookie:
-        headers["Cookie"] = cookie
-    url = f"https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid={room}"
-    resp = requests.get(url, headers=headers, proxies=_proxies(proxy), timeout=20)
-    text = (resp.text or "").strip()
-    if resp.status_code != 200 or not text.startswith("{"):
-        raise ResolveError("虎牙接口返回风控页面（该平台已加强反爬，稍后重试或改用代理）")
+def profile(data: dict[str, Any]) -> dict[str, str]:
+    info = data.get("profileInfo") or {}
+    live_data = data.get("liveData") or {}
+    return {
+        "anchor": str(info.get("nick") or ""),
+        "title": str(live_data.get("introduction") or ""),
+        "avatar": str(info.get("avatar180") or ""),
+        "uid": str(info.get("uid") or ""),
+    }
+
+
+def _presenter_uid(data: dict[str, Any]) -> int:
     try:
-        data = json.loads(text)
-    except ValueError as exc:
-        raise ResolveError("虎牙接口返回内容无法解析，稍后重试") from exc
-    return data.get("data") or {}
+        return int(str((data.get("profileInfo") or {}).get("uid") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
-def _huya_target_bitrate(quality: str) -> int:
-    """把用户选的档位换算成目标码率（kbps）。
+def _viewer_uid(cookie: str, data: dict[str, Any]) -> int:
+    """签名里的 uid：配置里的 yyuid/udb_uid > 主播 uid > 随机一个（stream-rec 的做法）。"""
+    if cookie:
+        for key in ("yyuid", "udb_uid"):
+            found = re.search(rf"(?:^|;\s*){key}=(\d+)", cookie)
+            if found:
+                return int(found.group(1))
+    uid = _presenter_uid(data)
+    if uid:
+        return uid
+    return random.randint(12340000, 12349999)
 
-    虎牙的档位名本身就带码率（蓝光20M / 蓝光6M / 蓝光4M），
-    也兼容传入规范码（OD/BD/UHD/HD/LD）或纯数字。
-    """
+
+# --------------------------------------------------------------------------- 画质
+
+
+def _bitrate_list(data: dict[str, Any]) -> list[dict[str, Any]]:
+    live_data = data.get("liveData") or {}
+    stream = data.get("stream") or {}
+
+    rows: list[Any] = []
+    raw = live_data.get("bitRateInfo")
+    if isinstance(raw, str) and raw.strip().startswith("["):
+        try:
+            rows = json.loads(raw)
+        except json.JSONDecodeError:
+            rows = []
+    if not rows:
+        flv = stream.get("flv") or {}
+        rows = flv.get("rateArray") or []
+
+    try:
+        max_bitrate = int(live_data.get("bitRate") or 0)
+    except (TypeError, ValueError):
+        max_bitrate = 0
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("sDisplayName") or "").strip()
+        try:
+            bitrate = int(item.get("iBitRate") or 0)
+        except (TypeError, ValueError):
+            bitrate = 0
+        if index == 0 and max_bitrate:
+            # 首档的 iBitRate 经常是 0，真实码率在 liveData.bitRate 里
+            bitrate = max_bitrate
+        if "HDR" in name.upper():
+            continue  # 虎牙的 HDR 档拿不到干净的主流，跳过
+        result.append({"name": name, "bitrate": bitrate, "codec": item.get("iCodecType", 0)})
+    return result
+
+
+def _extra_bitrates(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """`sFlvAntiCode` 的 `exsphd` 里会额外列出更高档位（HDR/杜比），格式 `codec_bitrate,...`。"""
+    stream = data.get("stream") or {}
+    infos = stream.get("baseSteamInfoList") or []
+    if not infos:
+        return []
+    anti = str((infos[0] or {}).get("sFlvAntiCode") or "")
+    query = dict(parse_qsl(anti))
+    raw = query.get("exsphd") or ""
+    extra: list[dict[str, Any]] = []
+    for part in raw.rstrip(",").split(","):
+        if "_" not in part:
+            continue
+        codec, _, bitrate = part.partition("_")
+        try:
+            value = int(bitrate)
+        except ValueError:
+            continue
+        if value <= 10000:  # 只要超额档（4K/HDR 之类）
+            continue
+        extra.append({"name": codec, "bitrate": value, "codec": 0})
+    return extra
+
+
+def _quality_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = _bitrate_list(data) + _extra_bitrates(data)
+    merged: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        bitrate = int(row.get("bitrate") or 0)
+        if bitrate in merged:
+            continue
+        merged[bitrate] = row
+    ordered = sorted(merged.values(), key=lambda r: int(r.get("bitrate") or 0), reverse=True)
+    for row in ordered:
+        if not row.get("name"):
+            row["name"] = "原画" if row is ordered[0] else f"{int(row.get('bitrate') or 0) // 1000}M"
+    return ordered
+
+
+def target_bitrate(quality: str) -> int:
+    """把用户选的档位名换算成码率（蓝光20M → 20000）。"""
     text = (quality or "").strip()
-    m = re.search(r"(\d+(?:\.\d+)?)\s*[Mm]\b", text)
-    if m:
-        return int(float(m.group(1)) * 1000)
-    m = re.search(r"\b(\d{3,5})\b", text)
-    if m:
-        return int(m.group(1))
-    for name, bitrate in (("原画", 0), ("蓝光", 6000), ("超清", 2000), ("高清", 1000), ("标清", 800), ("流畅", 500)):
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[Mm]\b", text)
+    if match:
+        return int(float(match.group(1)) * 1000)
+    match = re.search(r"\b(\d{3,5})\b", text)
+    if match:
+        return int(match.group(1))
+    for name, bitrate in (("原画", 0), ("蓝光", 6000), ("超清", 2000), ("高清", 1000),
+                          ("标清", 800), ("流畅", 500)):
         if name in text:
             return bitrate
     return _QUALITY_BITRATE.get(text, 0)
 
 
-def _huya_fresh_line(room_url: str, target_url: str, cookie: str = "", proxy: str = "") -> str:
-    """给 HLS 中转用：每次刷新播放列表都要一条**新签**的地址。
+def _pick_bitrate(rows: list[dict[str, Any]], wanted: str) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    text = (wanted or "").strip()
+    for row in rows:  # 名字完全一致优先
+        if row.get("name") == text:
+            return row
+    target = target_bitrate(text)
+    canonical = _name_to_quality(text)
+    if canonical:
+        same = [r for r in rows if _name_to_quality(str(r.get("name"))) == canonical]
+        if same:
+            return max(same, key=lambda r: int(r.get("bitrate") or 0))
+    if target <= 0:
+        return max(rows, key=lambda r: int(r.get("bitrate") or 0))
+    return min(rows, key=lambda r: (abs(int(r.get("bitrate") or 0) - target), -int(r.get("bitrate") or 0)))
 
-    虎牙的 wsTime/wsSecret 有有效期（几十秒后重签老地址也会 403），
-    所以这里重新问一次接口，按同 host 取回当次的新地址。
-    """
-    import urllib.parse  # noqa: PLC0415
 
+# --------------------------------------------------------------------------- 签名
+
+
+def _build_query(anti: str, uid: int, stream_name: str, bitrate: int | None = None) -> str:
+    """按 stream-rec 的 buildQuery 复刻 antiCode（含强制 codec=264）。"""
+    return _build_query_from(dict(parse_qsl((anti or "").rstrip(","))), uid, stream_name, bitrate)
+
+
+def _build_query_from(query: dict[str, str], uid: int, stream_name: str,
+                      bitrate: int | None = None) -> str:
+    ws_time = query.get("wsTime")
+    fm_raw = query.get("fm")
+    ctype = query.get("ctype")
+    if not (ws_time and fm_raw and ctype):
+        raise ResolveError("虎牙线路地址缺少签名参数（wsTime / fm / ctype）")
     try:
-        room = _huya_room_id(room_url, proxy)
-        # 2.5 秒的短缓存：HLS 中转刷新播放列表时会连续取几次，太频繁会被接口限流，
-        # 但签名 20 秒左右就过期，所以缓存不能超过一小会儿。
-        data = _huya_mp_data_cached(room, cookie, proxy, ttl=2.5)
-    except Exception:  # noqa: BLE001
-        return ""
-    host = urllib.parse.urlsplit(target_url).netloc
-    want_ratio = ""
-    match_ratio = re.search(r"[?&]ratio=(\d+)", target_url)
-    if match_ratio:
-        want_ratio = match_ratio.group(1)
-    lines = _huya_mp_lines(data, 0)
-    # 先按「同 CDN + 同 ratio（同一档位）」找，找不到再退回同 CDN，最后退回第一条
-    for line in lines:
-        if urllib.parse.urlsplit(line).netloc != host:
-            continue
-        got = re.search(r"[?&]ratio=(\d+)", line)
-        if want_ratio and got and got.group(1) == want_ratio:
-            return line
-    for line in lines:
-        if urllib.parse.urlsplit(line).netloc == host:
-            return line
-    return lines[0] if lines else ""
-
-
-def _huya_resign(url: str, to_flv: bool = False) -> str | None:
-    """重签虎牙线路的 wsSecret。
-
-    接口给的地址里 wsSecret 是绑定旧 seqid 的，直接拿来拉流会被 CDN 判 403；
-    用 fm 解出的前缀 + 新的 seqid 现算一次就能正常出数据（实测 flv/hls 都 200）。
-    """
-    import base64  # noqa: PLC0415
-    import hashlib  # noqa: PLC0415
-    import time  # noqa: PLC0415
-    from urllib.parse import unquote  # noqa: PLC0415
-
-    if not url:
-        return None
-    m = re.match(r"^(https?:)?//([^/]+)(/[^?]+?)(\.m3u8|\.flv)(\?.*)?$", url)
-    if not m:
-        return None
-    scheme = m.group(1) or "http:"
-    host, path, ext, query = m.group(2), m.group(3), m.group(4), m.group(5) or ""
-    params: dict[str, str] = {}
-    for part in query.lstrip("?").split("&"):
-        if "=" in part:
-            key, value = part.split("=", 1)
-            params[key] = value
-    ws_time = params.get("wsTime", "")
-    fm = unquote(params.get("fm", ""))
-    ratio = params.get("ratio", "")
-    if not (ws_time and fm):
-        return None
-    stream_name = path.rsplit("/", 1)[-1]
+        ct = int((int(ws_time, 16) + random.random()) * 1000)
+    except ValueError as exc:
+        raise ResolveError("虎牙线路签名参数 wsTime 不合法") from exc
+    seq_id = ct + uid
+    fm = _b64(fm_raw).split("_")[0]
     try:
-        prefix = base64.b64decode(fm + "=" * (-len(fm) % 4)).decode("utf-8", "replace").split("_")[0]
-    except Exception:  # noqa: BLE001
-        return None
-    seq = str(int(time.time() * 1e7))
-    secret = hashlib.md5("_".join([prefix, "0", stream_name, seq, ws_time]).encode()).hexdigest()
-    query_new = f"wsSecret={secret}&wsTime={ws_time}&u=0&seqid={seq}&fm={fm}"
-    if ratio:
-        query_new = f"ratio={ratio}&" + query_new
-    if to_flv:
-        host = host.replace("hls", "flv")
-        path = path + ".flv"
+        platform_id = int(query.get("t") or WEB_PLATFORM_ID)
+    except ValueError:
+        platform_id = WEB_PLATFORM_ID
+    ss = _md5(f"{seq_id}|{ctype}|{platform_id}")
+    rotated = ((uid << 8) | (uid >> 24)) & 0xFFFFFFFF
+    ws_secret = _md5(f"{fm}_{rotated}_{stream_name}_{ss}_{ws_time}")
+
+    params: list[tuple[str, str]] = [
+        ("wsSecret", ws_secret),
+        ("wsTime", ws_time),
+        ("seqid", str(seq_id)),
+        ("ctype", ctype),
+        ("fs", str(query.get("fs") or "")),
+        ("u", str(rotated)),
+        ("t", str(platform_id)),
+        ("ver", "1"),
+        ("uuid", str(int(((ct % 1e10) + random.random()) * 1e3 % 0xFFFFFFFF))),
+        # huya 的 h265 是「假 265」，强制 264 兼容性最好
+        ("sdk_sid", str(int(time.time()))),
+        ("codec", "264"),
+    ]
+    if bitrate:
+        params.append(("ratio", str(bitrate)))
+    return urlencode(params)
+
+
+def _url_for(info: dict[str, Any], uid: int, fmt: str, bitrate: int | None) -> str:
+    if fmt == "flv":
+        base = str(info.get("sFlvUrl") or "").replace("http://", "https://", 1)
+        suffix = str(info.get("sFlvUrlSuffix") or "flv")
+        anti = str(info.get("sFlvAntiCode") or "")
     else:
-        path = path + ext
-    return f"{scheme}//{host}{path}?{query_new}"
-
-
-def _huya_mp_lines(data: dict[str, Any], target_bitrate: int = 0) -> list[str]:
-    """把移动端接口里的线路重签后拼成可录地址列表。
-
-    顺序：先按码率就近排的 HLS（能按 ratio 选档），再补重签过的 FLV 直链
-    （HLS 某些 CDN 会 403，录制端会逐条轮换到 flv）。
-    """
-    stream = data.get("stream") or {}
-    hls_urls: list[str] = []
-    for item in ((stream.get("hls") or {}).get("multiLine") or []):
-        if not isinstance(item, dict) or not item.get("url"):
-            continue
-        signed = _huya_resign(str(item["url"]), to_flv=False)
-        if signed and signed not in hls_urls:
-            hls_urls.append(signed)
-    target = target_bitrate or 0
-    if hls_urls:
-        def _ratio(u: str) -> int:
-            m = re.search(r"[?&]ratio=(\d+)", u)
-            return int(m.group(1)) if m else 0
-
-        if target:
-            hls_urls.sort(key=lambda u: abs((_ratio(u) or target) - target))
-        else:
-            hls_urls.sort(key=lambda u: -_ratio(u))
-    flv_urls: list[str] = []
-    for item in stream.get("baseSteamInfoList") or []:
-        if not isinstance(item, dict):
-            continue
-        cdn = str(item.get("sFlvUrl") or "")
-        name = str(item.get("sStreamName") or "")
-        suffix = str(item.get("sFlvUrlSuffix") or "flv")
-        anti = str(item.get("sFlvAntiCode") or "")
-        if not (cdn and name):
-            continue
-        query = f"?{anti}" if anti else ""
-        raw = f"{cdn}/{name}.{suffix}{query}"
-        signed = _huya_resign(raw, to_flv=True) or raw
-        if signed not in flv_urls:
-            flv_urls.append(signed)
-    # 实测同一时刻有的 CDN 403、有的 200，hs 系最稳、al 最差，先按 CDN 排一层再按码率
-    def _cdn_rank(u: str) -> int:
-        host = u.split("/")[2] if "//" in u else u
-        if host.startswith("hs."):
-            return 0
-        if host.startswith("tx."):
-            return 1
-        return 2
-
-    hls_urls.sort(key=_cdn_rank)
-    flv_urls.sort(key=_cdn_rank)
-    return hls_urls + flv_urls
-
-
-def _huya_probe(url: str) -> bool:
-    """用 ffmpeg 空跑 3 秒，确认这条线路真的能出数据（403/秒断的线路直接淘汰）。"""
-    import subprocess  # noqa: PLC0415
-
-    ffmpeg = paths.ffmpeg_exe()
-    if not ffmpeg:
-        return True
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-rw_timeout", "15000000",
-           "-tls_verify", "0", "-i", url, "-t", "3", "-c", "copy", "-f", "null", "-"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                              errors="ignore", timeout=40)
-    except Exception:  # noqa: BLE001
-        return False
-    return proc.returncode == 0 and "Forbidden" not in (proc.stderr or "")
-
-
-_HUYA_RATE_PAT = re.compile(
-    r'"sDisplayName"\s*:\s*"([^"]*)"\s*,\s*"iBitRate"\s*:\s*(\d+)\s*,\s*"iCodecType"\s*:\s*(\d+)')
-
-
-def _huya_page_rates(html: str) -> list[tuple[str, int, int]]:
-    """虎牙页面里 `vBitRateInfo` 的完整档位表：[(档位名, 码率, 编码)]，编码 0=H.264、1=HEVC。
-
-    注意：高档位（蓝光20M / 蓝光10M）在 JSON 里 `iBitRate` 往往是 0，
-    只给了名字；这些档位在网页播放器里照样可选，所以不能因为码率是 0 就丢掉。
-    """
-    rows: list[tuple[str, int, int]] = []
-    for name, bitrate, codec in _HUYA_RATE_PAT.findall(html or ""):
-        clean = name.strip()
-        if clean:
-            rows.append((clean, int(bitrate or 0), int(codec or 0)))
-    return rows
-
-
-def _huya_mobile_profile(room: str, cookie: str, proxy: str) -> dict[str, Any]:
-    """虎牙的 PC 接口（cache.php?do=profileRoom）已经上风控、返回验证页；
-    移动页 m.huya.com 仍会把整块 roomProfile JSON 塞在 HTML 里，用老安卓 UA 才拿得到。"""
-    import requests  # noqa: PLC0415
-
-    headers = {"User-Agent": _ANDROID_UA, "Referer": f"https://m.huya.com/{room}"}
-    if cookie:
-        headers["Cookie"] = cookie
-    html = requests.get(f"https://m.huya.com/{room}", headers=headers,
-                        proxies=_proxies(proxy), timeout=20).text
-
-    def pick(*keys: str) -> str:
-        for key in keys:
-            m = re.search(r'"' + re.escape(key) + r'"\s*:\s*"([^"]*)"', html)
-            if m and m.group(1):
-                return m.group(1)
+        base = str(info.get("sHlsUrl") or "").replace("http://", "https://", 1)
+        suffix = str(info.get("sHlsUrlSuffix") or "m3u8")
+        anti = str(info.get("sHlsAntiCode") or "")
+    if not base or not anti:
         return ""
-
-    live = bool(re.search(r'"eLiveStatus"\s*:\s*2', html))
-    line_m = re.search(r'"liveLineUrl"\s*:\s*"([A-Za-z0-9+/=]+)"', html)
-    return {
-        "anchor_name": pick("sNick", "sNickName", "sActorNick"),
-        "title": pick("sRoomName", "sTitle"),
-        "introduction": pick("sIntroduction"),
-        "is_live": live,
-        "line_b64": line_m.group(1) if line_m else "",
-        "lines": _huya_stream_lines(html),
-        "rates": _huya_page_rates(html),
-    }
-
-
-def _huya_playlist_text(url: str, proxy: str) -> str:
-    """取一下播放列表的正文（200 才返回，失败给空串），用来判断是 media 还是 master。"""
-    import requests  # noqa: PLC0415
-
-    try:
-        resp = requests.get(url, headers={"User-Agent": _ANDROID_UA,
-                                          "Referer": "https://m.huya.com/"},
-                            proxies=_proxies(proxy), timeout=(5, 8), stream=True)
-        if resp.status_code != 200:
-            resp.close()
-            return ""
-        # 只读前 64KB：虎牙偶尔会回一条超长/不结束的响应，读到底会把解析卡死。
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in resp.iter_content(8192):
-            chunks.append(chunk)
-            total += len(chunk)
-            if total >= 65536:
-                break
-        resp.close()
-        return b"".join(chunks).decode("utf-8", "ignore")
-    except Exception:  # noqa: BLE001
+    name = str(info.get("sStreamName") or "")
+    if not name:
         return ""
-
-
-def _huya_url_alive(url: str, proxy: str) -> bool:
-    """拉一下流地址的前几百字节，确认不是 403/404 的死链。"""
-    import requests  # noqa: PLC0415
-
     try:
-        resp = requests.get(url, headers={"User-Agent": _ANDROID_UA}, proxies=_proxies(proxy),
-                            timeout=10, stream=True)
-        ok = resp.status_code == 200
-        ctype = str(resp.headers.get("Content-Type") or "").lower()
-        resp.close()
-        return ok and ("video" in ctype or "octet-stream" in ctype or "application/" in ctype)
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _huya_sign_url(line_b64: str) -> str | None:
-    """把 liveLineUrl 解出来的地址重新签名成可长期拉取的 flv（real-url 的 live() 算法）。
-
-    原始地址里的 wsSecret 与 wsTime 是绑定时间戳的，直接拿来录几分钟就 403；
-    这里用 fm 解出的前缀 + 新的 seqid 现算 wsSecret。
-    """
-    import base64  # noqa: PLC0415
-    import hashlib  # noqa: PLC0415
-    import time  # noqa: PLC0415
-
-    if not line_b64:
-        return None
-    b64 = line_b64 + "=" * (-len(line_b64) % 4)
-    try:
-        text = base64.b64decode(b64).decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
-        return None
-    text = text.strip().replace("\x00", "")
-    if not text:
-        return None
-    if "replay" in text:
-        return text
-    cut = re.search(r"\.(m3u8|flv)", text)
-    if not cut:
-        return None
-    base = text[: cut.end()]
-    tail = text[cut.end():]
-    ws_time = re.search(r"wsTime=([0-9a-fA-F]+)", tail)
-    fm = re.search(r"fm=([A-Za-z0-9+/=]+)", tail)
-    ratio = re.search(r"ratio=(\d+)", tail)
-    if not (ws_time and fm):
-        return None
-    stream_name = re.sub(r"\.(flv|m3u8)$", "", base.rsplit("/", 1)[-1])
-    fmv = fm.group(1)
-    prefix = base64.b64decode(fmv + "=" * (-len(fmv) % 4)).decode("utf-8", "replace").split("_")[0]
-    seq = str(int(time.time() * 1e7))
-    ws_time_v = ws_time.group(1)
-    secret = hashlib.md5("_".join([prefix, "0", stream_name, seq, ws_time_v]).encode()).hexdigest()
-    query = f"wsSecret={secret}&wsTime={ws_time_v}&u=0&seqid={seq}&fm={fmv}"
-    if ratio:
-        query = f"ratio={ratio.group(1)}&" + query
-    url = "https:" + base + "?" + query
-    return url.replace("hls", "flv").replace(".m3u8", ".flv")
-
-
-_huya_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def drop_cache(url: str) -> None:
-    """清掉某个直播间的解析缓存（虎牙的地址几十秒就过期，续录前必须拿新的）。"""
-    global _huya_cache  # noqa: PLW0603
-    room = ""
-    try:
-        match = re.search(r"huya\.com/([^/?#]+)", url or "")
-        if match:
-            room = match.group(1)
-    except Exception:  # noqa: BLE001
-        room = ""
-    if not room:
-        return
-    _huya_cache.pop(room, None)
-    # 线路表也要一起丢：里面存的是带 wsSecret 的旧地址，重签也只能续一小会儿。
-    for key in [k for k in _huya_mp_cache if k.split("|", 1)[0] == room]:
-        _huya_mp_cache.pop(key, None)
-_huya_preferred: dict[str, int] = {}
-_HUYA_CACHE_TTL = 10.0
-
-
-def _resolve_huya(url: str, quality_code: str, cookie: str, proxy: str) -> dict[str, Any]:
-    import time  # noqa: PLC0415
-
-    room = _huya_room_id(url, proxy)
-    now = time.time()
-    cached = _huya_cache.get(room)
-    if cached and now - cached[0] < _HUYA_CACHE_TTL:
-        return dict(cached[1])
-
-    try:
-        data = _huya_mp_data(room, cookie, proxy)
+        query = _build_query(anti, uid, name, bitrate)
     except ResolveError:
-        # 被限流时宁可沿用上一次结果，也不要让正在录的房间掉到错误态
-        if cached:
-            return dict(cached[1])
-        raise
+        return ""
+    return f"{base.rstrip('/')}/{name}.{suffix}?{query}"
 
-    live = str(data.get("liveStatus") or "").upper() == "ON"
-    profile = data.get("profileInfo") or {}
-    live_data = data.get("liveData") or {}
-    result: dict[str, Any] = {
-        "anchor_name": str(profile.get("nick") or "").strip(),
-        "title": str(live_data.get("roomName") or "").strip(),
-        "is_live": live,
-    }
-    if live:
-        candidates = _huya_mp_lines(data, _huya_target_bitrate(quality_code))
-        if not candidates:
-            page = _huya_mobile_profile(room, cookie, proxy)
-            signed = _huya_sign_url(page.get("line_b64", ""))
-            if signed:
-                candidates = [signed]
-            candidates += [line.get("url") or "" for line in page.get("lines") or []]
-        candidates = [c for c in candidates if c.startswith("http")]
-        # yt-dlp 的 HuyaLive 解析器自己算 anti-code，给出的地址通常比我们拼的更「新鲜」，
-        # 而且带了多档清晰度。把它排到最前面，拉不动时录制端会自动回落到下面的自有线路。
+
+def _candidates(data: dict[str, Any], wanted: str, cookie: str = "",
+                force_origin: bool = False) -> list[dict[str, Any]]:
+    """一条线路一条记录：CDN × {flv, hls} × 码率，按 iWebPriorityRate 排序。"""
+    stream = data.get("stream") or {}
+    infos = stream.get("baseSteamInfoList") or []
+    rows = _quality_rows(data)
+    picked = _pick_bitrate(rows, wanted)
+    uid = _viewer_uid(cookie, data)
+
+    try:
+        max_bitrate = int((data.get("liveData") or {}).get("bitRate") or 0)
+    except (TypeError, ValueError):
+        max_bitrate = 0
+
+    result: list[dict[str, Any]] = []
+    for raw in infos:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("sStreamName") or "")
+        if force_origin:
+            name = name.replace("-imgplus", "")
+            raw = dict(raw, sStreamName=name)
+        cdn = str(raw.get("sCdnType") or "")
         try:
-            from . import huya_ytdlp  # noqa: PLC0415
-
-            yt_lines = huya_ytdlp.urls(url, limit=6)
-        except Exception:  # noqa: BLE001
-            yt_lines = []
-        if yt_lines:
-            candidates = yt_lines + candidates
-        if not candidates:
-            raise ResolveError("虎牙未返回可用直播流（可能是付费/加密频道，或该房间已切到未支持的线路）")
-        # 注意：虎牙的签名地址基本是「一次性」的——用 GET 探一次，ffmpeg 再拉就是 403。
-        # 所以这里绝不去预读播放列表/探活，只按 CDN 稳定性排序，交给录制端逐个试，
-        # 由 HLS 中转在每次刷新时重新签名（见 liverec/hlsproxy.py）。
-        pref = _huya_preferred.get(room, 0) % len(candidates)
-        order = candidates[pref:] + candidates[:pref]
-        result.update({"quality": quality_code, "flv_url": order[0], "record_url": order[0],
-                       "lines": order})
-        _huya_preferred[room] = (pref + 1) % len(candidates)
-
-    _huya_cache[room] = (now, dict(result))
+            priority = int(raw.get("iWebPriorityRate") or 0)
+        except (TypeError, ValueError):
+            priority = 0
+        target_bitrate = int((picked or {}).get("bitrate") or 0)
+        bitrate = target_bitrate if target_bitrate and target_bitrate != max_bitrate else None
+        for fmt in ("hls", "flv"):
+            url = _url_for(raw, uid, fmt, bitrate)
+            if not url:
+                continue
+            result.append({
+                "url": url,
+                "format": fmt,
+                "cdn": cdn,
+                "priority": priority,
+                "stream_name": name,
+                "bitrate": target_bitrate,
+                "quality": str((picked or {}).get("name") or wanted),
+                "max_bitrate": max_bitrate,
+            })
+    result.sort(key=lambda c: (-int(c.get("priority") or 0), 0 if c.get("format") == "hls" else 1))
     return result
 
 
-def _huya_qualities(data: dict[str, Any],
-                    page_rates: list[tuple[str, int, int]] | None = None) -> list[dict[str, Any]]:
-    """虎牙的可选画质有两个来源，合并去重后每个码率各占一项。
-
-    1) 页面里的 `vBitRateInfo`（最全：含「蓝光20M / 蓝光10M / 2K HDR」这类高档位，
-       它们的 `iBitRate` 常是 0，只能从档位名里读出码率）；
-    2) `mp.huya.com` 的 `stream.hls.rateArray`（`iBitRate` + `sDisplayName`，实际可拉的线路档）。
-    不做「六档归一」，否则 蓝光20M 与 蓝光6M 会互相覆盖。
-    """
-    rows: list[tuple[int, str]] = []
-
-    def add(bitrate: int, name: str) -> None:
-        if not name:
-            return
-        for existing, _ in rows:
-            if existing == bitrate:
-                return
-        rows.append((bitrate, name))
-
-    for name, bitrate, _codec in page_rates or []:
-        rate = bitrate or _huya_target_bitrate(name)
-        if rate <= 0:
-            rate = 1  # 名字里读不出码率的档位排到末尾，但仍然展示
-        add(rate, name)
-
-    rate_array = (((data.get("stream") or {}).get("hls") or {}).get("rateArray") or [])
-    for rate in rate_array:
-        if not isinstance(rate, dict):
-            continue
-        name = str(rate.get("sDisplayName") or "").strip()
-        bitrate = int(rate.get("iBitRate") or 0)
-        if bitrate <= 0:
-            bitrate = _huya_target_bitrate(name) or 1
-        add(bitrate, name)
-
-    rows.sort(key=lambda x: -x[0])
-
-    items: list[dict[str, Any]] = []
-    for index, (bitrate, name) in enumerate(rows):
-        # 最高档就是原画（虎牙常把它叫「蓝光20M」）
-        if index == 0:
-            label = f"原画（{name}）" if "原画" not in name else name
-        else:
-            label = name
-        items.append(_quality_item(label, label, str(bitrate)))
-    for item in items:
-        item["note"] = "虎牙每档对应一条不同码率的线路，录制时优先走码率最接近的线路"
-    if items:
-        items[0]["default"] = True
-    return items
+# --------------------------------------------------------------------------- WUP 兜底
 
 
-# ---------------- 对外入口 ----------------
+def _tars_head(tag: int, type_id: int) -> bytes:
+    if tag < 15:
+        return bytes([(tag << 4) | type_id])
+    return bytes([(15 << 4) | type_id, tag])
 
 
-def resolve(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "") -> dict[str, Any]:
-    """返回 {is_live, anchor_name, title, record_url, flv_url, quality}；不直播时只有前三个。"""
-    return _resolve_huya(url, quality_code, cookie, proxy)
+def _tars_int(tag: int, value: int) -> bytes:
+    if value == 0:
+        return _tars_head(tag, 12)
+    if -128 <= value <= 127:
+        return _tars_head(tag, 0) + struct.pack("b", value)
+    if -32768 <= value <= 32767:
+        return _tars_head(tag, 1) + struct.pack(">h", value)
+    if -2147483648 <= value <= 2147483647:
+        return _tars_head(tag, 2) + struct.pack(">i", value)
+    return _tars_head(tag, 3) + struct.pack(">q", value)
+
+
+def _tars_string(tag: int, value: str) -> bytes:
+    data = (value or "").encode("utf-8")
+    if len(data) > 255:
+        return _tars_head(tag, 7) + struct.pack(">i", len(data)) + data
+    return _tars_head(tag, 6) + bytes([len(data)]) + data
+
+
+def _tars_bytes(tag: int, data: bytes) -> bytes:
+    return _tars_head(tag, 13) + _tars_int(0, len(data)) + data
+
+
+def _tars_empty_map(tag: int) -> bytes:
+    return _tars_head(tag, 8) + _tars_int(0, 0) + _tars_int(0, 0)
+
+
+def _tars_struct_end() -> bytes:
+    return _tars_head(0, 11)
+
+
+def _token_req(cdn: str, stream_name: str, presenter_uid: int) -> bytes:
+    return b"".join([
+        _tars_string(0, ""),
+        _tars_string(1, cdn),
+        _tars_string(2, stream_name),
+        _tars_int(3, presenter_uid),
+        _tars_struct_end(),
+    ])
+
+
+def _uni_attribute(key: str, payload: bytes) -> bytes:
+    """UniAttribute：v1 = map<string, bytes>，v3 = map<string, map<string, bytes>>。"""
+    if _WUP_STYLE == "v3":
+        inner = _tars_head(0, 8) + _tars_int(0, 2) + _tars_string(0, "s") + _tars_int(1, 7) \
+            + _tars_head(1, 13) + _tars_int(0, len(payload)) + payload + _tars_int(0, 0)
+        outer = _tars_head(0, 8) + _tars_int(0, 2) + _tars_string(0, key) + _tars_int(1, 8) + inner
+        return _tars_int(0, 3) + outer
+    # v1：version(short) + map<string, vector<byte>>
+    return (_tars_int(0, 1)
+            + _tars_head(1, 8) + _tars_int(0, 2) + _tars_string(0, key) + _tars_int(1, 13)
+            + _tars_int(0, len(payload)) + payload + _tars_int(0, 0))
+
+
+def _wup_body(attribute: bytes) -> bytes:
+    body = b"".join([
+        _tars_int(1, 3),               # version = VERSION3
+        _tars_int(2, 0),               # packetType
+        _tars_int(3, 0),               # messageType
+        _tars_int(4, random.randint(1, 2 ** 31 - 1)),  # requestId
+        _tars_string(5, "liveui"),     # servantName
+        _tars_string(6, "getCdnTokenInfo"),
+        _tars_bytes(7, attribute),     # uniAttribute
+        _tars_int(8, 3000),            # timeout
+        _tars_empty_map(9),            # context
+        _tars_empty_map(10),           # status
+        _tars_struct_end(),
+    ])
+    return struct.pack(">i", len(body) + 4) + body
+
+
+def _read_tars_strings(blob: bytes) -> list[str]:
+    """从 TARS 响应里把可读字符串捞出来（不完整实现：够找 antiCode/streamName 就行）。"""
+    out: list[str] = []
+    index = 0
+    while index < len(blob) - 1:
+        head = blob[index]
+        type_id = head & 0x0F
+        index += 1
+        if head >> 4 == 0x0F:
+            index += 1
+        if type_id == 6:  # String1
+            if index >= len(blob):
+                break
+            length = blob[index]
+            index += 1
+            out.append(blob[index:index + length].decode("utf-8", "replace"))
+            index += length
+        elif type_id == 7:  # String4
+            if index + 4 > len(blob):
+                break
+            length = struct.unpack(">i", blob[index:index + 4])[0]
+            index += 4
+            if 0 < length <= 65535:
+                out.append(blob[index:index + length].decode("utf-8", "replace"))
+            index += max(0, length)
+    return out
+
+
+def wup_token(cdn: str, stream_name: str, presenter_uid: int, proxy: str = "") -> dict[str, str] | None:
+    """stream-rec 的 getTrueUrl：向 WUP 要一份服务端 antiCode。失败返回 None。"""
+    import requests  # noqa: PLC0415
+
+    payload = _wup_body(_uni_attribute("tReq", _token_req(cdn, stream_name, presenter_uid)))
+    headers = {
+        "user-agent": HYSDK_UA,
+        "referer": HY_BASE,
+        "origin": HY_BASE,
+        "content-type": "application/octet-stream",
+    }
+    try:
+        resp = requests.post(WUP_URL, data=payload, headers=headers,
+                             proxies=_proxies(proxy), timeout=20)
+        blob = resp.content or b""
+    except Exception:  # noqa: BLE001
+        return None
+    if not blob or b"wsSecret" not in blob:
+        return None
+    strings = _read_tars_strings(blob)
+    anti = next((s for s in strings if "wsSecret" in s), "")
+    name = next((s for s in strings if s.lower().endswith((".flv", ".m3u8"))), "")
+    if not anti:
+        return None
+    return {"anti": anti, "stream": name or stream_name}
+
+
+def _alive(url: str, cookie: str = "", proxy: str = "", timeout: float = 6.0) -> bool:
+    """轻量探活：能读到一点数据就算活（虎牙的签名地址大多一次有效，别读太多）。"""
+    import requests  # noqa: PLC0415
+
+    headers = {"user-agent": _ANDROID_UA, "referer": HY_BASE}
+    if cookie:
+        headers["cookie"] = cookie
+    try:
+        with requests.get(url, headers=headers, proxies=_proxies(proxy), timeout=timeout,
+                          stream=True) as resp:
+            if resp.status_code >= 400:
+                return False
+            for _ in resp.iter_content(1024):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+# --------------------------------------------------------------------------- 对外接口
+
+
+def resolve(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "",
+            probe: bool = True) -> dict[str, Any]:
+    room = room_id(url, proxy)
+    data = mp_data(room, cookie, proxy, ttl=0.0)
+    info = profile(data)
+    live = is_live(data)
+    result: dict[str, Any] = {
+        "platform": "huya",
+        "anchor_name": info["anchor"] or f"虎牙 {room}",
+        "title": info["title"],
+        "is_live": live,
+        "record_url": "",
+        "flv_url": "",
+        "m3u8_url": "",
+        "lines": [],
+    }
+    if not live:
+        return result
+
+    rows = _quality_rows(data)
+    picked = _pick_bitrate(rows, quality_code)
+    candidates = _candidates(data, quality_code, cookie)
+    if not candidates:
+        raise ResolveError("虎牙没有返回可用的直播线路（接口可能被风控，稍后再试）")
+
+    # 候选轮转：同一个房间连续取流时，每次换一条线路试，避免老撞在同一个 CDN 上
+    index = _PREFERRED.get(room, 0) % len(candidates)
+    ordered = candidates[index:] + candidates[:index]
+
+    # 挑一条真的能拉起来：先试前 3 条，全死就走 WUP 要服务端 antiCode（stream-rec 的 getTrueUrl）
+    chosen = ordered[0]
+    found = not probe  # 中转刷新时不做探活（每次刷新都发 GET 太慢，也容易把签名用掉）
+    if probe:
+        for candidate in ordered[:3]:
+            if _alive(candidate["url"], cookie, proxy):
+                chosen = candidate
+                found = True
+                break
+    if not found:
+        token = wup_token(chosen["cdn"], chosen["stream_name"], _presenter_uid(data), proxy)
+        if token:
+            parts = urlsplit(chosen["url"])
+            query = dict(parse_qsl(parts.query))
+            query.update(dict(parse_qsl(token["anti"])))
+            token_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+            if _alive(token_url, cookie, proxy):
+                chosen = dict(chosen, url=token_url)
+    _PREFERRED[room] = (index + 1) % len(candidates)
+
+    # 记住 antiCode 相关材料，resign() 可以据此重新算一次签名
+    _ANTI_CACHE[chosen["url"]] = {
+        "cdn": chosen["cdn"],
+        "stream_name": chosen["stream_name"],
+        "bitrate": chosen["bitrate"],
+        "max_bitrate": chosen["max_bitrate"],
+        "presenter_uid": _presenter_uid(data),
+        "cookie": cookie,
+        "proxy": proxy,
+    }
+
+    quality_name = str((picked or {}).get("name") or quality_code)
+    canonical = _name_to_quality(quality_name) or "原画"
+    result.update({
+        "record_url": chosen["url"],
+        "flv_url": chosen["url"] if chosen["format"] == "flv" else "",
+        "m3u8_url": chosen["url"] if chosen["format"] == "hls" else "",
+        "lines": [c["url"] for c in ordered[:4]],
+        "quality_actual": canonical,
+        "quality_note": (
+            "" if quality_name.startswith(str(quality_code)[:2]) or quality_name == quality_code
+            else f"虎牙这房间当前只有「{quality_name}」这一档，已按它录"
+        ),
+        "cdn": chosen["cdn"],
+        "format": chosen["format"],
+    })
+    return result
 
 
 def qualities(url: str, cookie: str = "", proxy: str = "") -> dict[str, Any]:
-    """房间信息 + 真实可选档位（页面 vBitRateInfo 合并接口 rateArray）。"""
-    room = _huya_room_id(url, proxy)
-    data = _huya_mp_data(room, cookie, proxy)
-    page_rates: list[tuple[str, int, int]] = []
-    try:
-        page_rates = _huya_mobile_profile(room, cookie, proxy).get("rates") or []
-    except Exception:  # noqa: BLE001 - 页面拿不到就只用接口里的档位
-        page_rates = []
+    room = room_id(url, proxy)
+    data = mp_data(room, cookie, proxy, ttl=0.0)
+    info = profile(data)
+    rows = _quality_rows(data) if data.get("stream") else []
+    items: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        name = str(row.get("name") or "")
+        label = f"原画（{name}）" if index == 0 and "原画" not in name else name
+        items.append(_quality_item(label, label, str(int(row.get("bitrate") or 0)),
+                                   default=index == 0))
+    note = "虎牙按所选档位就近挑 CDN 线路；「蓝光20M / 2K HDR」这类高档位只有主播推了才会出现"
+    if not items:
+        note = "该房间当前没有返回可选画质（可能未开播）"
     return {
-        "anchor": str((data.get("profileInfo") or {}).get("nick") or ""),
-        "title": str((data.get("liveData") or {}).get("roomName") or ""),
-        "isLive": str(data.get("liveStatus") or "").upper() == "ON",
-        "qualities": _huya_qualities(data, page_rates),
+        "ok": bool(items),
+        "platform": "huya",
+        "anchor": info["anchor"],
+        "title": info["title"],
+        "isLive": is_live(data),
+        "qualities": items,
+        "note": note,
+        "error": "" if items else note,
     }
 
 
-def qualities_from_data(data: dict[str, Any],
-                        page_rates: list[tuple[str, int, int]] | None = None) -> list[dict[str, Any]]:
-    return _huya_qualities(data, page_rates)
+def qualities_from_data(data: dict[str, Any], page_rates: Any = None) -> dict[str, Any]:
+    """兼容 resolver 的 `_huya_qualities(data, page_rates)` 旧签名。"""
+    info = profile(data)
+    rows = _quality_rows(data)
+    items = []
+    for index, row in enumerate(rows):
+        name = str(row.get("name") or "")
+        label = f"原画（{name}）" if index == 0 and "原画" not in name else name
+        items.append(_quality_item(label, label, str(int(row.get("bitrate") or 0)),
+                                   default=index == 0))
+    return {"anchor": info["anchor"], "title": info["title"], "isLive": is_live(data),
+            "qualities": items}
 
 
-def next_stream(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "") -> str:
-    """给分片续录用：丢掉旧缓存，重新解析出一条**全新签名**的地址。"""
-    drop_cache(url)
-    info = resolve(url, quality_code, cookie, proxy)
-    return str(info.get("record_url") or "")
+def next_stream(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "") -> str | None:
+    """取一条新的（重新签名的）线路地址；失败返回 None。"""
+    try:
+        info = resolve(url, quality_code, cookie, proxy)
+    except ResolveError:
+        return None
+    return info.get("record_url") or None
+
+
+def drop_cache(url: str) -> None:
+    match = re.search(r"huya\.com/([^/?#]+)", url or "")
+    if not match:
+        return
+    room = match.group(1)
+    for key in [k for k in list(_MP_CACHE) if k.split("|", 1)[0] in (room, room.lower())]:
+        _MP_CACHE.pop(key, None)
+    _PREFERRED.pop(room, None)
+
+
+def resign(url: str, to_flv: bool = False) -> str | None:
+    """用原地址里的签名材料重算一次 wsSecret（不重新请求房间接口）。"""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    if not query.get("wsTime") or not query.get("fm"):
+        return None
+    meta = _ANTI_CACHE.get(url) or {}
+    stream = str(meta.get("stream_name") or parts.path.rsplit("/", 1)[-1].split(".")[0])
+    try:
+        uid = int(query.get("u") or 0)
+    except ValueError:
+        uid = 0
+    ratio = query.get("ratio")
+    try:
+        new_query = _build_query_from(query, uid, stream, int(ratio) if ratio else None)
+    except ResolveError:
+        return None
+    path = parts.path
+    if to_flv and path.endswith(".m3u8"):
+        path = path[:-5] + ".flv"
+    return urlunsplit((parts.scheme or "https", parts.netloc, path, new_query, ""))
+
+
+def fresh_line(room_url: str, target_url: str, cookie: str = "", proxy: str = "") -> str:
+    """HLS 中转每次刷新播放列表时用：重新问房间接口拿一条新地址（同 CDN 同档位优先）。
+
+    这里刻意 probe=False：刷新播放列表很频繁，探活既慢又会把一次性签名用掉。
+    """
+    try:
+        info = resolve(room_url, "原画", cookie, proxy, probe=False)
+    except ResolveError:
+        return ""
+    fresh = info.get("record_url") or ""
+    if not fresh:
+        return ""
+    target = urlsplit(target_url)
+    wanted = dict(parse_qsl(target.query)).get("ratio", "")
+    for candidate in [fresh] + list(info.get("lines") or []):
+        parts = urlsplit(candidate)
+        if parts.netloc != target.netloc:
+            continue
+        if wanted and dict(parse_qsl(parts.query)).get("ratio", "") not in ("", wanted):
+            continue
+        return candidate
+    return fresh
+
+
+# --------------------------------------------------------------------------- Cookie 校验
+
+
+def cookie_state(cookie: str, proxy: str = "") -> tuple[bool | None, str]:
+    """真实登录态校验：`POST https://udblgn.huya.com/web/cookie/verify`（appId=5002）。"""
+    import requests  # noqa: PLC0415
+
+    if not cookie:
+        return None, "未设置"
+    headers = {
+        "user-agent": HYSDK_UA,
+        "referer": HY_BASE,
+        "content-type": "application/json",
+        "cookie": cookie,
+    }
+    try:
+        resp = requests.post(COOKIE_VERIFY_URL, json={"appId": APP_ID}, headers=headers,
+                             proxies=_proxies(proxy), timeout=15)
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"校验接口请求失败：{type(exc).__name__}"
+    if not isinstance(payload, dict):
+        return None, "校验接口返回异常"
+    code = payload.get("returnCode")
+    message = str(payload.get("message") or "")
+    data = payload.get("data")
+    if code == 0:
+        # 实测：udblgn 对「没带有效登录态」的请求也回 returnCode=0、data=null，
+        # 所以只有真的带出用户信息时才敢判「登录有效」，否则只能算「没给结论」。
+        if isinstance(data, dict) and data:
+            nickname = str(data.get("nick") or data.get("nickName") or data.get("nickname") or "")
+            return True, f"登录有效{'：' + nickname if nickname else ''}"
+        return None, "接口只回了 returnCode=0，没返回用户信息"
+    if code in (101, 102, 103):
+        return False, f"Cookie 已失效（{message or code}）"
+    return None, f"校验接口没给出结论（returnCode={code} {message}）".strip()

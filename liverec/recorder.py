@@ -63,9 +63,10 @@ def _start_hls_proxy(url: str, platform: str, room_url: str = "",
             from . import huya as huya_mod  # noqa: PLC0415 - 虎牙实现在独立模块
 
             def signer(candidate: str) -> str:  # noqa: F811
-                # 每次刷新播放列表都要一条新签的地址（虎牙签名几十秒就过期）
-                fresh = huya_mod.fresh_line(room_url, candidate, cookie, proxy_addr)
-                return fresh or huya_mod.resign(candidate) or candidate
+                # 纯本地重算 wsSecret（微秒级）：stream-rec 也是这么做的。
+                # 刻意不在刷新里请求接口——一次几百毫秒会把 ffmpeg 的播放列表请求拖到超时；
+                # wsTime 真过期时由录制端换段重新 resolve 拿新的。
+                return huya_mod.resign(candidate) or candidate
 
         proxy = HlsProxy(url, headers, signer=signer)
         proxy.start()
@@ -393,7 +394,7 @@ class RecordTask:
             await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
-            if self._no_data:
+            if self._no_data and not (self.platform == "huya" and self.size > 0):
                 # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
                 self._no_data = False
                 interval = cfg.check_interval()
@@ -428,6 +429,15 @@ class RecordTask:
                 # 这一段什么都没录到（CDN 拒绝/中转失败）：把 0 字节的空壳清掉，
                 # 免得目录里堆一堆 0KB 的 .ts，看着像「录了但没数据」。
                 self._sweep_empty_files()
+                # 已经录到东西、只是这一小段空转：立刻换新签名再试几次，
+                # 别一断就回到 90 秒的等待（用户会觉得「录一半停了」）。
+                self._no_data = False
+                self._huya_streak += 1
+                if self._huya_streak <= 3:
+                    log("INFO", f"{self.anchor or self.url} 这一段没读到数据，换新签名重试"
+                                f"（{self._huya_streak}/3）")
+                    await self._wait(2.0)
+                    continue
             # 录制结束（主播下播/断流）：稍等再回到轮询
             await self._stop_danmaku()
             self._remember_part()
@@ -620,7 +630,13 @@ class RecordTask:
             await self._stop_danmaku()
         if self._stop.is_set():
             return
-        if self._no_data:
+        if self._no_data and self.platform == "huya" and self.size > 0:
+            # 虎牙：本段没有读到数据，但这一场已经录到东西了 —— 不算「线路不通」，
+            # 交给 _run() 的续段逻辑立刻换新签名重试，卡片保持「录制中」。
+            self._no_data = True
+            self.status = "recording"
+            self.note = "这一段没读到数据，正在换新签名重试"
+        elif self._no_data:
             # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
             self.status = "waiting"
             self.error = ""
@@ -779,6 +795,9 @@ class RecordTask:
             cmd += ["-headers", "Referer: https://live.douyin.com/\r\n"]
         elif self.platform == "huya":
             cmd += ["-headers", "Referer: https://m.huya.com/\r\nOrigin: https://m.huya.com\r\n"]
+            # 照 stream-rec：虎牙用 -xerror 让「拉不动」立刻失败（交给上层换新签名续录），
+            # 而不是挂着等超时；skip_frame/drop_changed 只在解码层生效，不影响 -c copy。
+            cmd += ["-xerror", "-skip_frame:v", "nokey", "-flags:v", "+drop_changed"]
         cmd += [
             "-i", stream_url,
             "-bufsize", "8000k", "-max_muxing_queue_size", "1024",

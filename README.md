@@ -45,7 +45,7 @@ https://v.douyin.com/xxxxxx/            # 短链，会先跟一次跳转再取
 | --- | --- | --- | --- |
 | 抖音 | ✅ | ✅ | 录制走 `a_bogus` 签名接口取原画 flv；弹幕走 WSS 推送 + webmssdk 签名 + protobuf 解包 |
 | B站 | ✅ | ✅ | 弹幕走 `buvid3` + wbi 签名的 `getDanmuInfo` 取节点再 WSS 订阅（聊天/礼物/上舰/进场全收）；录制按 `qn` 分档取流，未登录最高「超清」，想拿「原画」需在设置里填登录 Cookie |
-| 虎牙 | ❌ 已下线 | — | **暂停支持**：虎牙的流地址（wsSecret）一次性失效、各 CDN 频繁掐断，录不稳，先把录制支持整体关掉。实现仍保留在 `liverec/huya.py`（对外 `resolve / qualities / next_stream / drop_cache / resign / fresh_line / target_bitrate`），恢复时清空 `liverec/resolver.py` 里的 `DISABLED_PLATFORMS` 即可。添加虎牙链接现在会直接报「虎牙录制已暂时下线」，已有的虎牙房间启动时会被置为待机、不再自动重试 |
+| 虎牙 | ✅ | ✅ | 移植自 stream-rec：mp.huya.com 取房间信息（iPhone 微信 UA），CDN x {flv,hls} x 码率组成线路矩阵，antiCode 按 stream-rec 的公式本地重算（含 codec=264、u 旋转、ss），拉不动时走 WUP(liveup.getCdnTokenInfo) 要服务端 token；录制经本地 HLS 中转每次刷新重签 + 分片续录，收尾自动拼接。弹幕走 cdnws.api.huya.com 的 TARS 协议 |
 | 斗鱼 | ✅ | ✅ | 改走官方 `playweb.douyucdn.cn/lapi/live/hlsH5Preview`（`md5(rid+time)` 签名），实测 1440p 稳定连续录制，已不再依赖 Node/execjs；弹幕走弹幕服务器的**裸 TCP STT 协议**（8601/8602，不再走被墙掉的 WSS），聊天/礼物/进场都能收到 |
 
 ### 虎牙/斗鱼的取流实现（v0.1.1）
@@ -208,8 +208,8 @@ data/
 
 ## 已知限制
 
-- **虎牙录制已暂时下线**（`liverec/resolver.py` 的 `DISABLED_PLATFORMS`）：添加虎牙链接会直接报「虎牙录制已暂时下线」，已有的虎牙房间在启动时被置为待机、不再自动重试。实现与下面这些经验都保留在 `liverec/huya.py` 与本节，恢复支持时清空 `DISABLED_PLATFORMS` 即可。原因：虎牙的流地址（`wsSecret`）一次性失效 + 各 CDN 可用性差异巨大，实测只有个别 CDN 的 media 播放列表能持续出流，长录很难稳定
-- 以下为虎牙恢复支持时的参考记录（当前不影响其它平台）：
+- **虎牙录制已按 stream-rec 重写**：mp.huya.com 取信息 + CDN/格式/码率线路矩阵 + 本地重算 antiCode（codec=264）+ WUP token 兜底；实测 2560x1440 连续录制，落 FLV 后自动拼成用户选的容器
+- 虎牙这条链路的已知情况：
 - 虎牙官方赛事频道（如 660000）的部分线路会被 CDN 立即掐断（403）。**「连续 N 秒没长字节就停止录制」的看门狗已彻底删掉**（代码里不再有这段逻辑）：不会因为某段时间没数据就把录制判定成失败、也不会再打印「连续 N 秒没有新数据，已停止录制」。虎牙改成「这一段 20 秒没有写入增长就换一条新签名的地址接着录」，卡片始终保持「录制中」
 - **单线路**：每个直播间只解析出一条线路（以前会把十几条候选线路挨个试，日志里那句「线路 2/12 未出数据，尝试下一条」就是它）。现在这条线路一个字节都没出就回「等待开播」，等下一轮检测再试，不会卡在「录制中」、也不会再刷屏
 - 虎牙录制的实现已经从 `resolver.py` 里独立成 `liverec/huya.py`（虎牙签名是「一次一签」、多 CDN 可用性差异大、部分线路给的是静态分片，这三点和其它三个平台完全不同，所以单独放一个模块好维护）。调用方只用它对外暴露的 `resolve / qualities / next_stream / drop_cache / resign / fresh_line / target_bitrate`
