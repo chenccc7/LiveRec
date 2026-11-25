@@ -73,6 +73,10 @@ class Manager:
             room.setdefault("quality", self.cfg.quality())
             room.setdefault("danmaku", True)
             room.setdefault("enabled", True)
+            # 平台整体下线（比如虎牙）时，老房间留着卡片但不再自动拉起，避免每分钟报错刷日志
+            if resolver.platform_disabled_reason(resolver.detect_platform(room.get("url", ""))):
+                room["enabled"] = False
+                room["unattended"] = False
             # 无人值守是「每个直播间各自一份」：老版本没有这个字段时，沿用当时的全局开关
             room.setdefault("unattended", bool(self.unattended))
             room.setdefault("anchor", "")
@@ -129,7 +133,10 @@ class Manager:
             raise ValueError("直播间地址不能为空")
         platform = resolver.detect_platform(url)
         if platform == "unknown":
-            raise ValueError("暂不支持该链接，目前支持抖音 / B站 / 虎牙 / 斗鱼")
+            raise ValueError("暂不支持该链接，目前支持抖音 / B站 / 斗鱼")
+        disabled = resolver.platform_disabled_reason(platform)
+        if disabled:
+            raise ValueError(disabled)
         for room in self.meta.values():
             if room.get("url") == url:
                 raise ValueError("该直播间已存在")
@@ -282,14 +289,20 @@ class Manager:
     async def resume_unattended(self) -> int:
         """无人值守：启动时只恢复「自己开着无人值守」的房间。"""
         count = 0
+        skipped = 0
         for rid in list(self._order):
             room = self.meta.get(rid) or {}
+            if resolver.platform_disabled_reason(resolver.detect_platform(room.get("url", ""))):
+                skipped += 1
+                continue
             if not room.get("enabled", True):
                 continue
             if not room.get("unattended", bool(self.unattended)):
                 continue
             await self.start_room(rid)
             count += 1
+        if skipped:
+            log("INFO", f"{skipped} 个房间所属平台已下线（虎牙），启动时跳过")
         if count:
             log("INFO", f"无人值守已启动，{count} 个直播间进入开播监测"
                         f"（每 {self.cfg.check_interval()}s 检测一次）")

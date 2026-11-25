@@ -80,6 +80,18 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
+# 暂时下线的平台。虎牙的流地址（wsSecret）一次性失效 + 多 CDN 频繁掐断，
+# 现阶段录不稳，先整体关掉录制支持（代码留在 liverec/huya.py 里，恢复时把这里清空即可）。
+DISABLED_PLATFORMS: dict[str, str] = {
+    "huya": "虎牙录制已暂时下线：平台流地址一次性失效、CDN 频繁掐断，暂时录不稳。"
+            "可以先用抖音 / B站 / 斗鱼。",
+}
+
+
+def platform_disabled_reason(platform: str) -> str:
+    return DISABLED_PLATFORMS.get(platform or "", "")
+
+
 def select_source_url(url: str, info: dict) -> str:
     """抖音/TikTok 优先 flv；h265 编码的 flv 退回 hls。"""
     if any(k in url for k in ("douyin", "tiktok")):
@@ -835,6 +847,10 @@ def _douyin_qualities(room: dict[str, Any]) -> list[dict[str, Any]]:
 def _blocking_qualities(url: str, platform: str, cookie: str, proxy: str) -> dict[str, Any]:
     info: dict[str, Any] = {"ok": True, "platform": platform, "anchor": "", "title": "",
                             "isLive": False, "qualities": [], "note": ""}
+    disabled = platform_disabled_reason(platform)
+    if disabled:
+        return {"ok": False, "platform": platform, "error": disabled,
+                "anchor": "", "title": "", "isLive": False, "qualities": [], "note": ""}
     if platform == "bilibili":
         room_id = _bili_room_id(url)
         info["qualities"] = _bili_qualities(room_id, cookie, proxy)
@@ -972,6 +988,9 @@ def _blocking_resolve(
     own = semaphore or _GLOBAL_SEM
     own.acquire()
     try:
+        disabled = platform_disabled_reason(platform)
+        if disabled:
+            raise ResolveError(disabled)
         if platform == "douyin":
             info = _resolve_douyin(url, quality_code, cookie, proxy)
         elif platform == "huya":

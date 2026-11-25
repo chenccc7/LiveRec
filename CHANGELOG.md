@@ -20,6 +20,10 @@
   每张卡片新增「弹幕 / 无弹幕」开关（`PATCH /api/rooms/{id}` 的 `danmaku`，切换会重启该房间任务）。
 - 卡片：删掉「分段」这一格（保留「当前分段 x/y」进度条与文件名）；设置/编辑弹窗去掉「取消」与遮罩点击关闭，只留右上角 ✕。
 - 无人值守默认关闭：`manager.unattended` 初始值改为 `False`，新装程序与新加房间都要手动点「自动」才会在下次启动时自动监测。
+- **虎牙录制暂时下线**：新增 `resolver.DISABLED_PLATFORMS`（当前只含 `huya`）。`resolve()` / `fetch_qualities()` 遇到虎牙直接返回
+  「虎牙录制已暂时下线：平台流地址一次性失效、CDN 频繁掐断，暂时录不稳」。`manager.add()` 对虎牙链接直接报错不建卡；`manager.load()`
+  把已存在的虎牙房间置为待机（`enabled=False`、`unattended=False`），`resume_unattended()` 跳过并记一条「N 个房间所属平台已下线」；
+  添加弹窗与设置页的提示文案同步改成「抖音 / B站 / 斗鱼」。实现仍完整保留在 `liverec/huya.py`，恢复时清空 `DISABLED_PLATFORMS` 即可。
 
 ## v0.2.0（2026-11-25 20:30，未打 tag，等确认）
 
