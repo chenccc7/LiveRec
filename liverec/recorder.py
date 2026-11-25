@@ -355,6 +355,7 @@ class RecordTask:
             self.quality_actual = str(info.get("quality_actual") or "")
 
             if not info.get("is_live") or not info.get("record_url"):
+                await self._flush_parts_before_wait()
                 self.status = "waiting"
                 self.error = ""
                 interval = cfg.check_interval()
@@ -411,6 +412,7 @@ class RecordTask:
                 self._no_data = False
                 self._no_data_streak = 0
                 self._huya_stall_streak = 0
+                await self._flush_parts_before_wait()
                 interval = cfg.check_interval()
                 self.status = "waiting"
                 self.error = ""
@@ -425,6 +427,7 @@ class RecordTask:
                 # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
                 self._no_data = False
                 self._no_data_streak = 0
+                await self._flush_parts_before_wait()
                 interval = cfg.check_interval()
                 self.status = "waiting"
                 self.error = ""
@@ -714,6 +717,20 @@ class RecordTask:
             log("INFO", f"{anchor} 本次录制结束（{_fmt_size(self.size)}，{self.segments or 1} 个文件）")
         self.push(force=True)
 
+    async def _flush_parts_before_wait(self) -> None:
+        """进「等待开播」等于这一场结束：先把已录的分段合成一个文件。
+
+        下一轮开播就是新的一场，分段只在整场内有效；不在这里合并的话，
+        这些分段会一直散在目录里，等下次停止时才拼，时间戳还对不上。
+        """
+        if not self._parts:
+            return
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            # 还有一段正在写，别动它的文件
+            return
+        await self._finish_session(blocking=True, force=True)
+
     def _drop_route_cache(self) -> None:
         """虎牙断流后要「换地址」而不是拿旧地址重签：清接口缓存，下一轮拿新地址。"""
         if self.platform != "huya":
@@ -769,7 +786,8 @@ class RecordTask:
         log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
                     f"（{_fmt_size(size)}）：{os.path.basename(path)}")
 
-    async def _finish_session(self, blocking: bool = False) -> None:
+    async def _finish_session(self, blocking: bool = False,
+                             force: bool = False) -> None:
         """这场直播结束时，把虎牙的分段拼成一个完整文件。
 
         只有虎牙会「分段续录」，其它平台保持老行为：一个房间一个文件，
@@ -781,7 +799,7 @@ class RecordTask:
         # 只有这一场真的结束才合并。录制中途（虎牙签名到期续段）若合并，
         # 会删掉 ffmpeg 还在引用的分段，下一条续段就只剩
         # 「分段文件不存在，跳过拼接记录」，录制循环卡在收尾而不重开。
-        if (not self._stop.is_set() and self._loop_task is not None
+        if (not force and not self._stop.is_set() and self._loop_task is not None
                 and not self._loop_task.done() and self.status == "recording"):
             log("INFO", f"{self.anchor or self.url} 录制中，分段先留着，等这一场结束再合并")
             return
