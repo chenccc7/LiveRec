@@ -25,13 +25,8 @@ _BAD_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 _RES_RE = re.compile(r"Stream #\d+:\d+.*?(\d{2,5})x(\d{2,5})")
 _PROGRESS_KEYS = ("out_time_us", "total_size", "bitrate", "speed", "progress")
 
-# 录制过程中「多久没有新数据」就判定这条流挂了：停止录制、回到等待开播。
-# 直播断流时 ffmpeg 常常既不退出也不报错，只是不再写文件，用户看到的就是「卡片还在录制中但大小不动」。
-STALL_SECONDS = 60.0
-
-# 看门狗总开关：关闭后只会因为 ffmpeg 自己退出而收尾，不会因为「一段时间没长字节」就停录。
-# 用户要求关掉它——虎牙按分片续录时，换段瞬间的停顿会被误判成「没录到数据」。
-STALL_WATCHDOG = False
+# 录制过程中不会因为「多久没有新数据」而停止录制：
+# 只有 ffmpeg 自己退出才会收尾（虎牙还会按签名过期分片续录）。
 
 
 def safe_name(text: str, fallback: str = "未知主播") -> str:
@@ -97,9 +92,7 @@ class RecordTask:
         self.anchor = ""
         self.title = ""
         self.platform = resolver.detect_platform(url)
-        # 看门狗已按用户要求关闭：`_stall_seconds = 0` 表示永不因为「没长字节」停录。
-        # 虎牙仍会在 ffmpeg 自己退出（签名过期/CDN 掐断）时按分片续录。
-        self._stall_seconds = (15.0 if self.platform == "huya" else STALL_SECONDS) if STALL_WATCHDOG else 0.0
+        # 虎牙会在 ffmpeg 自己退出（签名过期/CDN 掐断）时按分片续录。
         # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
         self._huya_streak = 0
         self._chunk_index = 0
@@ -130,8 +123,9 @@ class RecordTask:
         self._live_since = 0.0
         self._last_error_lines: list[str] = []
         self.danmaku_forward: Callable[[dict], None] | None = None
-        self._last_growth = 0.0       # 最近一次文件体积增长的时刻
-        self._stalled = False         # 本次录制是否因为长时间无数据被主动中止
+        # 最近一次文件体积增长的时刻。只用来判断「虎牙这一段是不是卡死了要换新地址」，
+        # 不会因为超时就停止录制（停止是用户明确要求去掉的）。
+        self._last_growth = 0.0
         self._quality_checked = False  # 本场是否已经按房间真实档位校正过画质
 
     # ---------- 对外快照 ----------
@@ -193,9 +187,7 @@ class RecordTask:
         self.note = ""
         self.quality_note = ""
         self.quality_actual = ""
-        self._stalled = False
         self._quality_checked = False
-        self._last_growth = time.time()
         self._base_bytes = 0
         self._huya_streak = 0
         self._chunk_index = 0
@@ -235,9 +227,12 @@ class RecordTask:
         self._loop_task = None
         self.status = status
         self.next_check_at = 0.0
-        # 停止按钮/删卡片时也要把这次直播的分段拼起来，否则用户只拿到一堆零散文件
+        # 停止按钮/删卡片时也要把这次直播的分段拼起来，否则用户只拿到一堆零散文件。
+        # 这里是同步等待合并完成：用户点完「停止」就应该在目录里看到完整文件，
+        # 而不是过一会儿才出现（删卡片时可能连进程都已经被关掉了）。
+        self._refresh_disk()
         self._remember_part()
-        self._finish_session()
+        await self._finish_session(blocking=True)
         self.push(force=True)
         if was_recording:
             # 停录默认是「静默」的，出问题时看不出录音是谁停的；记一条便于排查。
@@ -384,7 +379,7 @@ class RecordTask:
             await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
-            if self.platform == "huya" and not self._stalled and self.size > self._base_bytes:
+            if self.platform == "huya" and self.size > self._base_bytes:
                 # 虎牙签名几十秒就过期，ffmpeg 每次都会在过期点正常退出（rc 0）。
                 # 只要这一段真的录到了东西，就按分片边界处理：记下已录字节，重新解析
                 # 拿新签名接着录，卡片保持「录制中」；低于阈值则交给下面的失败分支退避。
@@ -408,48 +403,10 @@ class RecordTask:
                 # 这一段什么都没录到（CDN 拒绝/中转失败）：把 0 字节的空壳清掉，
                 # 免得目录里堆一堆 0KB 的 .ts，看着像「录了但没数据」。
                 self._sweep_empty_files()
-            if self._stalled:
-                if self.platform == "huya" and self.size > 0:
-                    # 虎牙：签名到期被掐断是常态，立刻换新签名续录，卡片保持「录制中」，
-                    # 每段单独落一个文件（时间戳不同，不会覆盖）；已录字节要接着累计，
-                    # 否则卡片上的体积会突然掉回 0。
-                    segment_bytes = self.size - self._base_bytes
-                    if segment_bytes >= 300 * 1024:
-                        # 这一段真的录到了东西（虎牙单段常见 0.5–2.5MB），
-                        # 说明不是被限流，连续失败计数清零
-                        self._huya_streak = 0
-                    self._huya_streak += 1
-                    if self._huya_streak <= 6:
-                        self._remember_part()
-                        self._base_bytes = self.size
-                        self._stalled = False
-                        self.status = "recording"
-                        self.error = ""
-                        self.note = "虎牙签名到期自动续录（每段单独成文件）"
-                        self.push(force=True)
-                        # 连续几次拿不到数据时退避，否则会被 CDN 当成刷量，越试越 403
-                        await self._wait(min(1.0 + self._huya_streak, 5.0))
-                        continue
-                    log("WARN",
-                        f"{self.anchor or self.url} 连续 {self._huya_streak} 段没有新数据"
-                        "（可能被 CDN 限流），暂停重试，回到等待开播")
-                    self._huya_streak = 0
-                    self._chunk_index = 0
-                # 无数据看门狗：不报错，回到等待开播；断流大多是线路被掐，
-                # 先按短间隔重试（15 秒），让换线/重连尽快生效。
-                await self._stop_danmaku()
-                self._finish_session()
-                interval = min(15.0, float(cfg.check_interval()))
-                self.status = "waiting"
-                self.error = ""
-                self.next_check_at = time.time() + interval
-                self.push(force=True)
-                await self._wait(interval)
-                continue
             # 录制结束（主播下播/断流）：稍等再回到轮询
             await self._stop_danmaku()
             self._remember_part()
-            self._finish_session()
+            await self._finish_session()
             log(
                 "INFO",
                 f"{self.anchor or self.url} 本段录制结束（{self.size_text}），"
@@ -529,9 +486,7 @@ class RecordTask:
         self.error = ""
         self.next_check_at = 0.0
         self._last_error_lines = []
-        self._stalled = False
         self.note = ""
-        self._last_growth = time.time()
         self.push(force=True)
         log("SUCCESS", f"{anchor} 开始录制（{platform_label} · {self.quality} · {fmt.upper()}）→ {out_dir}")
 
@@ -597,12 +552,12 @@ class RecordTask:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
                     break
-                # 已经出过数据，但连续一段时间不再增长：判流挂住，停止本次录制回到等待开播。
-                # 看门狗关闭时 `_stall_seconds` 为 0，这里直接跳过，只等 ffmpeg 自己退出。
-                if (self._stall_seconds > 0 and self.size > 0
-                        and time.time() - self._last_growth > self._stall_seconds):
-                    self._stalled = True
-                    log("WARN", f"{anchor} 连续 {int(self._stall_seconds)} 秒没有新数据，停止录制，回到等待开播")
+                # 虎牙专用：已经录到过数据、但这一段 20 秒没有任何增长。
+                # 这不是「停录」，而是换一条新签名的地址接着录（每段单独落文件），
+                # 否则 ffmpeg 会挂在那里不动、卡片一直显示「录制中」但体积不变。
+                if (self.platform == "huya" and self.size > self._base_bytes
+                        and time.time() - self._last_growth > 20.0):
+                    log("WARN", f"{anchor} 这 20 秒没有再写入数据（虎牙签名到期），换新地址接着录")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -628,10 +583,6 @@ class RecordTask:
             # 虎牙的分片很小（3 个分片 ≈ 1.4MB、3 秒就 EOF），阈值按「有数据」来判，
             # 不能再用 2MB/20 秒，否则每段都被当成失败、不断换线。
             healthy = code in (0, None) and (chunk_bytes > 512 * 1024 or self.elapsed >= 20)
-            if self._stalled:
-                # 已经录到过数据但流挂了：保留已录内容，直接交给外层处理（等待开播）
-                healthy = self.size > 0
-                break
             if healthy or self._stop.is_set() or index == len(candidates) - 1:
                 break
             # 这条线路没出数据（虎牙/斗鱼的 CDN 会秒断），换下一条重试
@@ -644,10 +595,7 @@ class RecordTask:
             await self._stop_danmaku()
         if self._stop.is_set():
             return
-        if self._stalled:
-            self.note = f"连续 {int(self._stall_seconds)} 秒没有新数据，已停止录制，等待下次开播"
-            log("INFO", f"{anchor} 本次录制结束（无数据看门狗触发，{_fmt_size(self.size)}）")
-        elif not healthy:
+        if not healthy:
             tail = " | ".join(self._last_error_lines[-3:]) or "所有线路均无法拉流"
             self.status = "error"
             self.error = tail[:300]
@@ -687,25 +635,34 @@ class RecordTask:
             log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
                         f"（{_fmt_size(size)}）：{name}")
 
-    def _finish_session(self) -> None:
+    async def _finish_session(self, blocking: bool = False) -> None:
         """这场直播结束时，把虎牙的分段拼成一个完整文件。
 
         只有虎牙会「分段续录」，其它平台保持老行为：一个房间一个文件，
         中途换线留下的文件原样留着，不做任何拼接。
+
+        blocking=True 时当场（在 executor 里）拼完再返回——用户点「停止录制」
+        就是这条路，停止后马上能在目录里看到合好的完整文件。
         """
         parts = [p for p in self._parts if os.path.isfile(p)]
         self._parts = []
         if self.platform != "huya":
             return
+        target_fmt = ""
+        try:
+            target_fmt = self.cfg.save_format()
+        except Exception:  # noqa: BLE001
+            target_fmt = ""
         if len(parts) < 2:
-            if parts:
-                # 只有一段也要收尾：虎牙中间文件是 FLV，按用户选的格式转一次，
-                # 否则设置里选了 ts/mp4 却只拿到一个 .flv。
-                target_fmt = ""
-                try:
-                    target_fmt = self.cfg.save_format()
-                except Exception:  # noqa: BLE001
-                    target_fmt = ""
+            if not parts:
+                return
+            # 只有一段也要收尾：虎牙中间文件是 FLV，按用户选的格式转一次，
+            # 否则设置里选了 ts/mp4 却只拿到一个 .flv。
+            if blocking:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, concat.convert_session, parts[0], target_fmt)
+                log("INFO", f"{self.anchor or self.url} 单段录制已收尾（按 {target_fmt or '原格式'} 输出）")
+            else:
                 threading.Thread(
                     target=concat.convert_session,
                     args=(parts[0], target_fmt),
@@ -717,17 +674,20 @@ class RecordTask:
         stem = re.sub(r"(_\d+)+\.(ts|mkv|flv|mp4)$", "", first) or (self.anchor or "session")
         ext = "flv" if self.platform == "huya" else "ts"
         out = os.path.join(self.out_dir, f"{stem}_merged.{ext}")
-        target_fmt = ""
-        try:
-            target_fmt = self.cfg.save_format()
-        except Exception:  # noqa: BLE001
-            target_fmt = ""
-        threading.Thread(
-            target=concat.merge_session,
-            args=(parts, out, False, target_fmt),
-            daemon=True,
-            name="concat",
-        ).start()
+        if blocking:
+            loop = asyncio.get_running_loop()
+            ok, message = await loop.run_in_executor(
+                None, concat.merge_session, parts, out, False, target_fmt)
+            log("INFO" if ok else "WARN",
+                f"{self.anchor or self.url} 停止后已合并 {len(parts)} 个分段 → "
+                f"{os.path.basename(out)}（{message or 'ok'}）")
+        else:
+            threading.Thread(
+                target=concat.merge_session,
+                args=(parts, out, False, target_fmt),
+                daemon=True,
+                name="concat",
+            ).start()
 
     def _sweep_empty_files(self) -> None:
         """扫一遍本房间的输出目录，删掉 0 字节的空壳文件。
@@ -854,7 +814,7 @@ class RecordTask:
                 new_size = int(val)
             except ValueError:
                 return
-            if new_size != self.size:
+            if self._base_bytes + new_size != self.size:
                 self._last_growth = time.time()
             self.size = self._base_bytes + new_size
             self.size_text = _fmt_size(self.size)

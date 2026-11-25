@@ -197,22 +197,27 @@ def convert_session(path: str, target_fmt: str = "") -> None:
 
 
 def merge_session(parts: list[str], out: str, keep_parts: bool = False,
-                  target_fmt: str = "") -> None:
-    """后台线程入口：拼接 + 记日志 + 视情况清理分段，可选再转成目标容器。"""
+                  target_fmt: str = "") -> tuple[bool, str]:
+    """拼接 + 记日志 + 视情况清理分段，可选再转成目标容器。
+
+    返回 (是否成功, 说明)；既能给后台线程用（忽略返回值），
+    也能在「停止录制」时被同步 await（要拿到结果做日志）。
+    """
     label = os.path.basename(out)
     if len(parts) < 2:
-        return
+        return True, "只有一个分段，无需拼接"
     log("INFO", f"{label} 开始拼接 {len(parts)} 个分段…")
     ok, detail = merge_parts(parts, out)
     if not ok:
         log("WARN", f"{label} 拼接失败（分段已保留）：{detail}")
-        return
+        return False, detail
     log("SUCCESS", f"{label} 拼接完成，时长 {detail}")
     if target_fmt:
         ok2, detail2 = remux(out, target_fmt)
         if not ok2:
             log("WARN", f"{label} 转成「{target_fmt}」失败，保留拼接文件：{detail2}")
-        elif detail2 != "无需转换":
+            return True, f"已拼接（{detail}），转封装失败：{detail2}"
+        if detail2 != "无需转换":
             log("SUCCESS", f"{label} 已转成 {detail2}")
     if not keep_parts:
         for part in parts:
@@ -221,6 +226,7 @@ def merge_session(parts: list[str], out: str, keep_parts: bool = False,
                     os.remove(part)
             except OSError:
                 pass
+    return True, detail
 
 
 async def _amain() -> None:  # pragma: no cover - 手工调试用

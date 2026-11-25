@@ -133,7 +133,12 @@ class DanmakuSession:
         # 两份会话共用一个 JSONL 与一行 DB 记录，条数就会一会儿大一会儿小。
         # 追加 4 位随机串保证每次录制都有独立会话。
         self.session_id = f"{platform}_{_safe_name(anchor)}_{stamp}_{uuid4().hex[:4]}"
-        folder = os.path.join(paths.danmaku_dir(), platform, _safe_name(anchor))
+        # 弹幕明细跟着视频走：放在这次录制的视频目录下的 danmaku/ 子目录里，
+        # 这样「视频 + 弹幕」永远在同一个主播文件夹内，拷贝/归档不会漏掉。
+        if video_dir:
+            folder = os.path.join(video_dir, "danmaku")
+        else:
+            folder = os.path.join(paths.danmaku_dir(), platform, _safe_name(anchor))
         self.jsonl_path = os.path.join(folder, f"{self.session_id}.jsonl")
         self.count = 0
         self.status = "connecting"
@@ -243,8 +248,10 @@ def create_client(platform: str, url: str, cookie: str = ""):
     return maker(url, cookie)
 
 
-def journal_path(platform: str, anchor: str, stamp: str) -> str:
-    folder = os.path.join(paths.danmaku_dir(), platform, _safe_name(anchor))
+def journal_path(platform: str, anchor: str, stamp: str, video_dir: str = "") -> str:
+    """弹幕明细路径：优先落在视频目录下的 danmaku/，否则退回 data/danmaku。"""
+    folder = (os.path.join(video_dir, "danmaku") if video_dir
+              else os.path.join(paths.danmaku_dir(), platform, _safe_name(anchor)))
     return os.path.join(folder, f"{platform}_{_safe_name(anchor)}_{stamp}.jsonl")
 
 
