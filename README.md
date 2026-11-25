@@ -1,8 +1,5 @@
 # LiveRec 控制台
 
-给 [DouyinLiveRecorder](https://github.com/ihmily/DouyinLiveRecorder) 做的图形界面：多直播间同屏值守、卡片式监看、录像与弹幕同步采集，打包成单个 `LiveRec.exe` 双击即用。
-
-![主界面](docs/screenshot-main.png)
 
 ## 功能
 
