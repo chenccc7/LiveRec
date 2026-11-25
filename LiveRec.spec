@@ -27,6 +27,8 @@ _binaries = [
 
 hiddenimports = (
     collect_submodules("uvicorn")
+    # yt-dlp 的虎牙解析器按需 import 大量 extractor 模块，必须整包收集
+    + collect_submodules("yt_dlp")
     + [
         "websockets",
         "websockets.legacy",
@@ -61,6 +63,7 @@ hiddenimports = (
         "liverec.danmaku.huya",
         "liverec.danmaku.proto",
         "liverec.danmaku.proto.douyin_pb2",
+        "liverec.huya_ytdlp",
     ]
 )
 

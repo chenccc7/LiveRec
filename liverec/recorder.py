@@ -278,6 +278,12 @@ class RecordTask:
                     # 虎牙的 wsSecret 只有 20–30 秒有效期，分片续录必须重新拿地址，
                     # 否则会一直复用缓存里那条已经过期的 URL（表现就是「录着录着停住」）。
                     resolver.drop_cache(self.url)
+                    try:
+                        from . import huya_ytdlp  # noqa: PLC0415
+
+                        huya_ytdlp.clear(self.url)
+                    except Exception:  # noqa: BLE001
+                        pass
                 info = await asyncio.wait_for(
                     resolver.resolve(
                         self.url,

@@ -1081,6 +1081,16 @@ def _resolve_huya(url: str, quality_code: str, cookie: str, proxy: str) -> dict[
                 candidates = [signed]
             candidates += [line.get("url") or "" for line in page.get("lines") or []]
         candidates = [c for c in candidates if c.startswith("http")]
+        # yt-dlp 的 HuyaLive 解析器自己算 anti-code，给出的地址通常比我们拼的更「新鲜」，
+        # 而且带了多档清晰度。把它排到最前面，拉不动时录制端会自动回落到下面的自有线路。
+        try:
+            from . import huya_ytdlp  # noqa: PLC0415
+
+            yt_lines = huya_ytdlp.urls(url, limit=6)
+        except Exception:  # noqa: BLE001
+            yt_lines = []
+        if yt_lines:
+            candidates = yt_lines + candidates
         if not candidates:
             raise ResolveError("虎牙未返回可用直播流（可能是付费/加密频道，或该房间已切到未支持的线路）")
         # 注意：虎牙的签名地址基本是「一次性」的——用 GET 探一次，ffmpeg 再拉就是 403。
