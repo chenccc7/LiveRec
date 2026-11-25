@@ -1050,8 +1050,7 @@ function openSettings() {
           <input data-st="saveRoot" value="${escapeHtml(st.saveRoot || '')}" placeholder="downloads" spellcheck="false"></label>
         <label class="fld" style="grid-column:1/-1"><span>弹幕保存路径（留空 = 跟随每场录像目录下的 danmaku/）</span>
           <input data-st="danmakuRoot" value="${escapeHtml(st.danmakuRoot || '')}" placeholder="留空则跟随视频目录" spellcheck="false"></label>
-          <label class="fld" style="grid-column:1/-1"><span>虎牙分片合并临时目录（留空 = 程序 data/merge-tmp）</span>          <input data-st="tempDir" value="${escapeHtml(st.tempDir || '')}" placeholder="留空则用程序 data 下的 merge-tmp" spellcheck="false"></label>
-        <label class="fld ckfld" style="grid-column:1/-1"><span>ffmpeg 路径（留空 = 用内置的）</span>
+          <label class="fld ckfld" style="grid-column:1/-1"><span>ffmpeg 路径（留空 = 用内置的）</span>
           <input data-st="ffmpegPath" value="${escapeHtml(st.ffmpegPath || '')}" placeholder="${escapeHtml(st.ffmpeg || 'bin\\ffmpeg.exe')}" spellcheck="false">
           <em class="ckout" style="color:#7b8698" title="${escapeHtml(st.ffmpeg || '')}">当前生效：${escapeHtml(st.ffmpeg || '未找到')}</em></label>
         <label class="fld"><span>循环检测间隔（秒）</span>

@@ -54,24 +54,6 @@ def _run(cmd: list[str], timeout: float = 3600.0) -> tuple[int, str]:
     return res.returncode, (res.stderr or "").strip()
 
 
-def temp_root() -> str:
-    """拼接用的临时目录：优先用设置里指定的，否则 data/merge-tmp。"""
-    try:
-        from .config import Config
-        from . import paths as _paths
-        cfg = Config(os.path.join(_paths.config_dir(), "config.ini"))
-        root = cfg.temp_dir()
-    except Exception:
-        from . import paths as _paths
-        root = os.path.join(_paths.data_dir(), "merge-tmp")
-    try:
-        os.makedirs(root, exist_ok=True)
-    except OSError:
-        root = os.path.join(_paths.data_dir(), "merge-tmp")
-        os.makedirs(root, exist_ok=True)
-    return root
-
-
 def probe_duration(path: str) -> float:
     """用 ffmpeg -i 的输出抓时长（秒），拿不到返回 0。"""
     if not os.path.isfile(path):
@@ -119,7 +101,7 @@ def _write_list(items: list[str], list_path: str) -> None:
 
 def _concat(items: list[str], out: str, container: str) -> tuple[bool, str]:
     """直接用 concat 分离器把若干文件拼到 out（流拷贝，不重编码）。"""
-    tmp_root = os.path.join(paths.data_dir(), "merge-tmp")
+    tmp_root = os.path.dirname(os.path.abspath(items[0])) if items else tempfile.gettempdir()
     os.makedirs(tmp_root, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(prefix="c-", dir=tmp_root)
     try:
@@ -176,7 +158,7 @@ def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
             return True, note
         log("WARN", f"直接拼接失败（{detail}），改走逐段重封装")
 
-    tmp_root = os.path.join(paths.data_dir(), "merge-tmp")
+    tmp_root = os.path.dirname(os.path.abspath(items[0])) if items else tempfile.gettempdir()
     os.makedirs(tmp_root, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(prefix="m-", dir=tmp_root)
     try:

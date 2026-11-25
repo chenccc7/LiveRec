@@ -23,7 +23,6 @@ K_QUALITY = "原画|超清|高清|标清|流畅"
 K_FORMAT = "视频保存格式ts|mkv|flv|mp4|mp3音频|m4a音频"
 # 弹幕明细（jsonl）落盘位置；留空 = 跟着录像目录走（<录像目录>/danmaku/）
 K_DANMAKU_ROOT = "弹幕保存路径(不填则跟随视频目录)"
-K_TEMP_DIR = "虎牙分片合并临时目录(不填则程序 data 下)"
 # 自定义 ffmpeg.exe 路径；留空 = 用内置（bin/ffmpeg.exe）或 PATH 里的那个
 K_FFMPEG = "ffmpeg路径(不填则用内置)"
 
@@ -140,19 +139,6 @@ class Config:
                 pass
         return paths.default_download_dir()
 
-    def temp_dir(self) -> str:
-        """虎牙分段拼接时的临时目录（录像缓存），留空用 data/merge-tmp。"""
-        import liverec.paths as _paths  # noqa: PLC0415
-
-        raw = (self.raw(SEC_REC, K_TEMP_DIR, "") or "").strip().strip('"').strip("'")
-        if not raw:
-            return os.path.join(_paths.data_dir(), "merge-tmp")
-        try:
-            os.makedirs(raw, exist_ok=True)
-            return raw
-        except OSError:
-            return os.path.join(_paths.data_dir(), "merge-tmp")
-
     def danmaku_root(self) -> str:
         """弹幕明细的根目录；空串表示「跟着视频目录走」（放在录像旁边的 danmaku/ 里）。"""
         custom = self.raw(SEC_REC, K_DANMAKU_ROOT, "").strip()
@@ -203,7 +189,6 @@ class Config:
             "saveFormat": self.save_format(),
             "saveRoot": self.save_root(),
             "danmakuRoot": self.danmaku_root(),
-            "tempDir": (self.raw(SEC_REC, K_TEMP_DIR, "") or "").strip(),
             "splitEnabled": self.split_enabled(),
             "splitSeconds": self.split_seconds(),
             "loopInterval": self.loop_interval(),
@@ -224,8 +209,6 @@ class Config:
             self.set(SEC_REC, K_FORMAT, str(data["saveFormat"]).lower())
         if "saveRoot" in data:
             self.set(SEC_REC, "直播保存路径(不填则默认)", str(data["saveRoot"] or ""))
-        if "tempDir" in data:
-            self.set(SEC_REC, K_TEMP_DIR, str(data.get("tempDir") or "").strip())
         if "danmakuRoot" in data:
             self.set(SEC_REC, K_DANMAKU_ROOT, str(data["danmakuRoot"] or ""))
         if "ffmpegPath" in data:

@@ -99,6 +99,7 @@ class RecordTask:
         # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
         self._huya_streak = 0
         self._no_data = False
+        self._no_data_streak = 0
         self._chunk_index = 0
         self._parts: list[str] = []
         self.error = ""
@@ -194,6 +195,7 @@ class RecordTask:
         self._quality_checked = False
         self._base_bytes = 0
         self._no_data = False
+        self._no_data_streak = 0
         self._huya_streak = 0
         self._chunk_index = 0
         self._parts: list[str] = []
@@ -394,9 +396,10 @@ class RecordTask:
             await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
-            if self._no_data and not (self.platform == "huya" and self.size > 0):
+            if self._no_data and self.size <= 0 and self._no_data_streak >= 2:
                 # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
                 self._no_data = False
+                self._no_data_streak = 0
                 interval = cfg.check_interval()
                 self.status = "waiting"
                 self.error = ""
@@ -432,6 +435,7 @@ class RecordTask:
                 # 已经录到东西、只是这一小段空转：立刻换新签名再试几次，
                 # 别一断就回到 90 秒的等待（用户会觉得「录一半停了」）。
                 self._no_data = False
+                self._no_data_streak = 0
                 self._huya_streak += 1
                 if self._huya_streak <= 3:
                     log("INFO", f"{self.anchor or self.url} 这一段没读到数据，换新签名重试"
@@ -469,6 +473,7 @@ class RecordTask:
     async def _record_once(self, stream_url: str, lines: list[str] | None = None) -> None:
         cfg = self.cfg
         self._no_data = False
+        self._no_data_streak = 0
         fmt = cfg.save_format()
         split = cfg.split_enabled()
         split_time = cfg.split_seconds()
@@ -581,10 +586,13 @@ class RecordTask:
                     )
                 # 一个字节都没出：这条线路就是死的（403/秒断/挂住），
                 # 直接结束这一段，回到「等待开播」，不换线路、也不报错。
-                first_wait = 25.0 if self.platform == "huya" else 20.0
+                first_wait = 45.0 if self.platform == "huya" else 20.0
                 if self.size <= 0 and time.time() - attempt_started > first_wait:
                     self._no_data = True
-                    log("WARN", f"{anchor} {int(first_wait)} 秒没有收到任何数据，回到等待开播")
+                    # 连续两次都没出数据才回等待；只失败一次就先重试，别把整场打断。
+                    self._no_data_streak += 1
+                    log("WARN", f"{anchor} {int(first_wait)} 秒没有收到任何数据"
+                                  f"（第 {self._no_data_streak} 次，连续 2 次才回到等待开播）")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -621,6 +629,10 @@ class RecordTask:
             healthy = chunk_bytes > 512 * 1024 or (code in (0, None) and self.elapsed >= 20)
             if chunk_bytes <= 0 and not self._stop.is_set():
                 self._no_data = True
+                self._no_data_streak += 1
+                if self._last_error_lines:
+                    log("WARN", f"{anchor} 这一段没出数据，ffmpeg 最后一行："
+                                  f"{self._last_error_lines[-1]}")
                 self._discard_empty_files(out_dir, prefix)
             break
 
@@ -636,8 +648,8 @@ class RecordTask:
             self._no_data = True
             self.status = "recording"
             self.note = "这一段没读到数据，正在换新签名重试"
-        elif self._no_data:
-            # 线路一个字节都没出：不报错、不换线，直接回等待开播等下一轮检测。
+        elif self._no_data and self._no_data_streak >= 2:
+            # 连续两次都没出数据：不报错、不换线，回等待开播等下一轮检测。
             self.status = "waiting"
             self.error = ""
             self.note = "这条线路没有出数据，已回到等待开播（下播/风控/地址失效都会这样）"

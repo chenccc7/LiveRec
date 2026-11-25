@@ -72,7 +72,6 @@ class SettingsBody(BaseModel):
     saveFormat: str | None = None
     saveRoot: str | None = None
     danmakuRoot: str | None = None
-    tempDir: str | None = None
     ffmpegPath: str | None = None
     splitEnabled: bool | None = None
     splitSeconds: int | None = None
