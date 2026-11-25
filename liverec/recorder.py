@@ -533,9 +533,11 @@ class RecordTask:
                 done, _ = await asyncio.wait({pump}, timeout=5)
                 if done:
                     break
-                # 拉了 20 秒还一个字节都没有：这条线路是死的（403/秒断/挂住），直接换
-                if self.size <= 0 and time.time() - attempt_started > 20:
-                    log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} 20 秒无数据，切换线路")
+                # 一条线路迟迟一个字节都没有：死线路（403/秒断/挂住），直接换下一条。
+                # 虎牙的线路一开拉就出数据，等 8 秒足够；其它平台给 20 秒（起播慢的 CDN 不少）。
+                first_wait = 8.0 if self.platform == "huya" else 20.0
+                if self.size <= 0 and time.time() - attempt_started > first_wait:
+                    log("WARN", f"{anchor} 线路 {index + 1}/{len(candidates)} {int(first_wait)} 秒无数据，切换线路")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -677,16 +679,16 @@ class RecordTask:
             cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", "192k"]
             cmd += seg + ["-segment_format", "ipod"] if split else ["-f", "ipod"]
         elif fmt == "mkv":
-            cmd += ["-map", "0", "-c", "copy", "-flags", "global_header"]
+            cmd += ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-flags", "global_header"]
             cmd += seg + ["-segment_format", "matroska"] if split else ["-f", "matroska"]
         elif fmt == "mp4":
-            cmd += ["-map", "0", "-c", "copy", "-movflags", "+frag_keyframe+empty_moov"]
+            cmd += ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-movflags", "+frag_keyframe+empty_moov"]
             cmd += seg + ["-segment_format", "mp4"] if split else ["-f", "mp4"]
         elif fmt == "flv":
-            cmd += ["-map", "0", "-c", "copy"]
+            cmd += ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy"]
             cmd += seg + ["-segment_format", "flv"] if split else ["-f", "flv"]
         else:  # ts
-            cmd += ["-map", "0", "-c", "copy"]
+            cmd += ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy"]
             cmd += seg + ["-segment_format", "mpegts"] if split else ["-f", "mpegts"]
         cmd.append(out_pattern)
         return cmd
