@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LiveRec 控制台 · 原型</title>
+<style>
+  :root {
+    --bg: #0a0d13;
+    --panel: #11151d;
+    --panel-2: #151a24;
+    --panel-3: #1a2030;
+    --line: #222a38;
+    --line-soft: #1b2230;
+    --text: #e9eef8;
+    --muted: #8b97ad;
+    --dim: #5f6b80;
+    --accent: #5b8cff;
+    --rec: #ff4d5e;
+    --wait: #ffb020;
+    --idle: #78849a;
+    --err: #ff6b6b;
+    --ok: #35d07f;
+    --radius: 14px;
+    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    background:
+      radial-gradient(1100px 460px at 12% -8%, rgba(91,140,255,.13), transparent 60%),
+      radial-gradient(900px 420px at 88% -12%, rgba(255,77,94,.09), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+
+  .app { max-width: 1480px; margin: 0 auto; padding: 0 26px 40px; }
+
+  /* ── 顶栏 ─────────────────────────────── */
+  .topbar {
+    display: flex; align-items: center; gap: 18px;
+    padding: 16px 0 18px;
+    position: sticky; top: 0; z-index: 20;
+    background: linear-gradient(180deg, rgba(10,13,19,.96) 62%, rgba(10,13,19,0));
+    backdrop-filter: blur(6px);
+  }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px;
+    display: grid; place-items: center;
+    background: linear-gradient(140deg, #5b8cff, #8b5bff 55%, #ff4d5e);
+    box-shadow: 0 6px 18px rgba(91,140,255,.35);
+    flex: none;
+  }
+  .brand h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: .2px; }
+  .brand .sub { font-size: 11px; color: var(--dim); letter-spacing: .6px; }
+  .ver {
+    font-size: 10.5px; color: #9fb4e8; background: rgba(91,140,255,.12);
+    border: 1px solid rgba(91,140,255,.28); padding: 2px 7px; border-radius: 20px;
+    letter-spacing: .4px;
+  }
+
+  .topbar .spacer { flex: 1; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 34px; padding: 0 13px;
+    border-radius: 9px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text);
+    font-size: 13px; font-family: inherit; cursor: pointer;
+    transition: .16s ease;
+  }
+  .btn:hover { background: var(--panel-3); border-color: #2c3648; }
+  .btn.primary {
+    background: linear-gradient(180deg, #ff5566, #ea3b4d);
+    border-color: #ff6b7a; color: #fff; font-weight: 600;
+    box-shadow: 0 5px 16px rgba(255,77,94,.28);
+  }
+  .btn.primary:hover { filter: brightness(1.07); }
+  .btn.ghost { background: transparent; }
+  .btn.accent { border-color: rgba(91,140,255,.45); color: #b9cdfa; background: rgba(91,140,255,.1); }
+  .btn svg { width: 15px; height: 15px; }
+
+  /* ── 概览条 ───────────────────────────── */
+  .overview {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 12px; margin-bottom: 20px;
+  }
+  .ov {
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,0));
+    border: 1px solid var(--line-soft);
+    border-radius: 12px; padding: 12px 15px;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .ov .k { font-size: 11.5px; color: var(--dim); letter-spacing: .3px; }
+  .ov .v { font-size: 21px; font-weight: 650; letter-spacing: -.4px; font-variant-numeric: tabular-nums; }
+  .ov .v small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+  .ov.live .v { color: var(--rec); }
+  .ov.wait .v { color: var(--wait); }
+
+  /* ── 卡片网格 ─────────────────────────── */
+  .grid {
+    display: grid; gap: 16px; align-items: start;
+    grid-template-columns: repeat(auto-fill, minmax(382px, 1fr));
+  }
+
+  .card {
+    position: relative;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 15px 16px 13px;
+    display: flex; flex-direction: column; gap: 12px;
+    transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+    overflow: hidden;
+  }
+  .card::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+    background: var(--idle); opacity: .55;
+  }
+  .card.recording::before { background: linear-gradient(90deg, var(--rec), rgba(255,77,94,0)); opacity: 1; }
+  .card.waiting::before { background: linear-gradient(90deg, var(--wait), rgba(255,176,32,0)); opacity: .9; }
+  .card.error::before { background: linear-gradient(90deg, var(--err), rgba(255,107,107,0)); opacity: .9; }
+  .card:hover { border-color: #303b50; transform: translateY(-2px); box-shadow: 0 14px 34px rgba(0,0,0,.36); }
+
+  /* 卡片头：状态 + 标签 */
+  .chead { display: flex; align-items: center; gap: 9px; }
+  .status {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 600; letter-spacing: .2px;
+    padding: 3px 9px 3px 8px; border-radius: 20px;
+    border: 1px solid transparent;
+  }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .status b { font-variant-numeric: tabular-nums; font-weight: 650; letter-spacing: .4px; }
+  .status.recording { color: #ff8a95; background: rgba(255,77,94,.11); border-color: rgba(255,77,94,.3); }
+  .status.recording .dot { animation: pulse 1.6s infinite; box-shadow: 0 0 0 0 rgba(255,77,94,.6); }
+  .status.waiting { color: #ffc457; background: rgba(255,176,32,.1); border-color: rgba(255,176,32,.28); }
+  .status.stopped { color: #97a3b8; background: rgba(140,151,171,.1); border-color: rgba(140,151,171,.24); }
+  .status.error { color: #ff9a9a; background: rgba(255,107,107,.12); border-color: rgba(255,107,107,.3); }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(255,77,94,.55); }
+    70% { box-shadow: 0 0 0 6px rgba(255,77,94,0); }
+    100% { box-shadow: 0 0 0 0 rgba(255,77,94,0); }
+  }
+
+  .chead .spacer { flex: 1; }
+
+  .tags { display: flex; align-items: center; gap: 5px; }
+  .tag {
+    font-size: 10.5px; line-height: 1; padding: 4px 7px; border-radius: 6px;
+    border: 1px solid var(--line); color: var(--muted); background: rgba(255,255,255,.02);
+    white-space: nowrap;
+  }
+  .tag.plat { font-weight: 600; border-color: transparent; }
+  .tag.douyin { color: #ff6b81; background: rgba(255,77,94,.13); }
+  .tag.bilibili { color: #4dc4f0; background: rgba(0,161,214,.14); }
+  .tag.huya { color: #ffb35c; background: rgba(255,150,0,.14); }
+  .tag.douyu { color: #ff9f6b; background: rgba(255,110,40,.14); }
+  .tag.proxy { color: #a99bff; border-color: rgba(169,155,255,.3); background: rgba(169,155,255,.08); }
+
+  /* 主播信息 */
+  .who { display: flex; gap: 11px; align-items: flex-start; }
+  .avatar {
+    width: 42px; height: 42px; border-radius: 11px; flex: none;
+    display: grid; place-items: center;
+    font-size: 16px; font-weight: 650; color: #fff;
+    border: 1px solid rgba(255,255,255,.1);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.14);
+  }
+  .who .info { min-width: 0; }
+  .who .name { font-size: 14.5px; font-weight: 650; letter-spacing: .1px; display: flex; align-items: center; gap: 7px; }
+  .who .name .follow { font-size: 10.5px; color: var(--dim); font-weight: 500; }
+  .who .title {
+    font-size: 12.3px; color: var(--muted); margin-top: 2px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  /* 分段进度 */
+  .meter { }
+  .meter .row { display: flex; justify-content: space-between; font-size: 11px; color: var(--dim); margin-bottom: 5px; }
+  .meter .row b { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .bar { height: 5px; border-radius: 4px; background: #1c2230; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #ff5566, #ff8a5c); }
+  .bar.wait > i { background: linear-gradient(90deg, #ffb020, #ffd66b); }
+
+  /* 指标 */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .stat { background: rgba(255,255,255,.022); border: 1px solid var(--line-soft); border-radius: 9px; padding: 7px 8px; }
+  .stat .k { font-size: 10px; color: var(--dim); letter-spacing: .2px; white-space: nowrap; }
+  .stat .v { font-size: 12.5px; font-weight: 650; margin-top: 1px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* 文件行 */
+  .file {
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11px; color: #93a1ba;
+    background: rgba(0,0,0,.26); border: 1px solid var(--line-soft);
+    border-radius: 8px; padding: 6px 9px;
+  }
+  .file svg { width: 12px; height: 12px; flex: none; color: var(--dim); }
+  .file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 弹幕抽屉 */
+  .dm { border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(0,0,0,.2); overflow: hidden; }
+  .dm-head {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 10px; cursor: pointer; user-select: none;
+    font-size: 11.5px; color: var(--muted);
+  }
+  .dm-head .live {
+    margin-left: 8px; font-size: 9.5px; font-weight: 700; letter-spacing: .8px;
+    color: #ff8a95; display: inline-flex; align-items: center; gap: 4px;
+  }
+  .dm-head .live i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: pulse 1.6s infinite; }
+  .dm-head .chev { margin-left: auto; transition: .18s; color: var(--dim); display: inline-flex; }
+  .dm.open .chev { transform: rotate(180deg); }
+  .dm-list { display: none; padding: 2px 10px 9px; flex-direction: column; gap: 6px; }
+  .dm.open .dm-list { display: flex; }
+  .dmi { font-size: 12px; display: flex; gap: 7px; align-items: baseline; }
+  .dmi .t { font-family: var(--mono); font-size: 10px; color: #4f5a6e; flex: none; }
+  .dmi .nick { color: #7fb0ff; flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dmi .txt { color: #b9c4d6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dmi.gift .txt { color: #ffb86b; }
+  .dmi.like .txt, .dmi.enter .txt { color: var(--dim); }
+
+  /* 底部操作 */
+  .cact { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+  .cact .spacer { flex: 1; }
+  .ibtn {
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    border: 1px solid var(--line); background: rgba(255,255,255,.02);
+    color: var(--muted); cursor: pointer; transition: .15s;
+  }
+  .ibtn:hover { color: var(--text); background: var(--panel-3); border-color: #313c51; }
+  .ibtn svg { width: 14px; height: 14px; }
+  .ibtn.danger:hover { color: #ff9a9a; border-color: rgba(255,107,107,.45); background: rgba(255,107,107,.1); }
+  .ibtn.stop:hover { color: #ff8a95; border-color: rgba(255,77,94,.45); background: rgba(255,77,94,.1); }
+
+  /* 等待开播 / 错误 的专属块 */
+  .notice {
+    display: flex; gap: 9px; align-items: flex-start;
+    border-radius: 9px; padding: 9px 11px; font-size: 11.8px; line-height: 1.5;
+  }
+  .notice.waiting { background: rgba(255,176,32,.07); border: 1px solid rgba(255,176,32,.22); color: #e9c986; }
+  .notice.error { background: rgba(255,107,107,.08); border: 1px solid rgba(255,107,107,.26); color: #ffb3b3; }
+  .notice svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+  .notice code { font-family: var(--mono); font-size: 10.5px; color: #ff9a9a; }
+  .notice .fix { display: block; color: #c9a0a0; margin-top: 2px; }
+
+  /* ── 添加直播间弹窗 ────────────────────── */
+  .mask {
+    position: fixed; inset: 0; z-index: 60; display: none; place-items: center;
+    background: rgba(4,6,10,.72); backdrop-filter: blur(4px); padding: 24px;
+  }
+  .mask.show { display: grid; }
+  .modal {
+    width: 600px; max-width: 100%;
+    background: var(--panel-2); border: 1px solid #2a3345; border-radius: 16px;
+    overflow: hidden; box-shadow: 0 40px 110px rgba(0,0,0,.7);
+  }
+  .mhead { display: flex; align-items: center; gap: 10px; padding: 15px 18px; border-bottom: 1px solid var(--line-soft); }
+  .mhead h3 { margin: 0; font-size: 15px; font-weight: 650; }
+  .mhead .hint { font-size: 11.5px; color: var(--dim); }
+  .mhead .x { margin-left: auto; width: 28px; height: 28px; border-radius: 8px; border: 1px solid transparent;
+    background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; }
+  .mhead .x:hover { background: var(--panel-3); color: var(--text); }
+  .mbody { padding: 18px; display: flex; flex-direction: column; gap: 15px; }
+  .fld > label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .input {
+    display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 12px;
+    background: #0b0f16; border: 1px solid #2a3345; border-radius: 9px;
+  }
+  .input:focus-within { border-color: rgba(91,140,255,.6); box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .input svg { color: var(--dim); flex: none; }
+  .input input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: 13px; }
+  .detect {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 12px; border-radius: 10px; font-size: 12.4px; color: #b9c8e4;
+    background: rgba(91,140,255,.07); border: 1px solid rgba(91,140,255,.22);
+  }
+  .detect .ok { margin-left: auto; font-size: 11px; color: #84d6a2; display: inline-flex; align-items: center; gap: 5px; }
+  .detect .ok i { width: 5px; height: 5px; border-radius: 50%; background: #35d07f; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .sel {
+    height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+    background: #0b0f16; border: 1px solid #2a3345; border-radius: 9px; font-size: 13px;
+  }
+  .sel span { margin-left: auto; color: var(--dim); }
+  .sel select {
+    appearance: none; -webkit-appearance: none; border: 0; outline: 0; background: none;
+    color: var(--text); font: inherit; font-size: 13px; flex: 1; min-width: 0;
+  }
+  .sel select option { background: #11151d; color: var(--text); }
+  .optrow { display: flex; align-items: center; gap: 10px; font-size: 12.6px; color: #b6c1d3; padding: 2px 0; }
+  .optrow .desc { color: var(--dim); font-size: 11.5px; }
+  .sw { width: 34px; height: 19px; border-radius: 20px; background: #2a3345; position: relative; flex: none; }
+  .sw i { position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #8b97ad; transition: .2s; }
+  .sw.on { background: #4a6fd8; }
+  .sw.on i { left: 17px; background: #fff; }
+  .mfoot { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--line-soft); background: rgba(0,0,0,.2); }
+  .mfoot .spacer { flex: 1; }
+  .mfoot .tip { font-size: 11.5px; color: var(--dim); }
+
+  /* 日志区 */
+  .logs { margin-top: 22px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(0,0,0,.24); overflow: hidden; }
+  .logs-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); font-size: 12px; color: var(--muted); }
+  .logs-head .spacer { flex: 1; }
+  .logs-body { padding: 9px 14px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.85; }
+  .lrow { display: flex; gap: 10px; }
+  .lrow .ts { color: #495366; flex: none; }
+  .lrow .lv { flex: none; width: 56px; font-weight: 600; }
+  .lrow .lv.i { color: #6f8fd6; }
+  .lrow .lv.w { color: #ffb020; }
+  .lrow .lv.e { color: #ff7b7b; }
+  .lrow .lv.s { color: #45d68a; }
+  .lrow .msg { color: #a9b5c8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .foot { margin-top: 16px; font-size: 11px; color: #4a5468; display: flex; gap: 14px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.2" fill="#fff" stroke="none"></circle>
+          <path d="M12 2.6v3.2M12 18.2v3.2M2.6 12h3.2M18.2 12h3.2"></path>
+          <path d="M5.4 5.4l2.2 2.2M16.4 16.4l2.2 2.2M18.6 5.4l-2.2 2.2M7.6 16.4l-2.2 2.2"></path>
+        </svg>
+      </div>
+      <div>
+        <h1>LiveRec 控制台</h1>
+        <div class="sub">DOUYIN LIVE RECORDER</div>
+      </div>
+      <span class="ver">v0.1 原型</span>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn primary">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6c0 .8.9 1.3 1.6.9l10.4-6.8c.6-.4.6-1.4 0-1.8L9.6 4.3C8.9 3.9 8 4.4 8 5.2z"/></svg>
+      全部开始
+    </button>
+    <button class="btn">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      全部停止
+    </button>
+    <button class="btn accent">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      添加直播间
+    </button>
+    <button class="btn ghost" style="width:34px;padding:0;justify-content:center">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <!-- 概览 -->
+  <section class="overview">
+    <div class="ov"><div class="k">直播间</div><div class="v">6</div></div>
+    <div class="ov live"><div class="k">正在录制</div><div class="v">3<small>个</small></div></div>
+    <div class="ov wait"><div class="k">等待开播</div><div class="v">1</div></div>
+    <div class="ov"><div class="k">本次写入</div><div class="v">14.9<small>GB</small></div></div>
+    <div class="ov"><div class="k">弹幕已采集</div><div class="v">3,942<small>条</small></div></div>
+  </section>
+
+  <!-- 卡片网格 -->
+  <section class="grid" id="grid"></section>
+
+  <!-- 日志 -->
+  <section class="logs">
+    <div class="logs-head">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      运行日志
+      <span style="color:#3d4557">·</span>
+      <span style="color:#4a5468">logs/app_2026-11-24.log</span>
+      <div class="spacer"></div>
+      <span style="font-size:11px;color:#4a5468">实时跟随</span>
+      <span style="width:6px;height:6px;border-radius:50%;background:#35d07f;box-shadow:0 0 6px #35d07f"></span>
+    </div>
+    <div class="logs-body" id="logs"></div>
+  </section>
+
+  <div class="foot">
+    <span>FFmpeg 9.0.2 · 已内嵌</span>
+    <span>保存目录 downloads/</span>
+    <span>监听 127.0.0.1:8765</span>
+    <span>示例数据（界面原型）</span>
+  </div>
+</div>
+
+<!-- 添加直播间弹窗 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <div class="mhead">
+      <h3>添加直播间</h3>
+      <span class="hint">粘贴分享链接即可，平台与主播自动识别</span>
+      <button class="x" id="btn-close">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="mbody">
+      <div class="fld">
+        <label>直播间地址</label>
+        <div class="input">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.4 1.4"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.4-1.4"/></svg>
+          <input value="https://live.douyin.com/725816392047" spellcheck="false" />
+        </div>
+      </div>
+
+      <div class="detect">
+        <span class="tag plat douyin">抖音</span>
+        <span>主播 <b style="color:#e9eef8">电竞小分队</b></span>
+        <span style="color:#3d4557">·</span>
+        <span>开播中 · 12.4 万人在看</span>
+        <span class="ok"><i></i>已取到直播流</span>
+      </div>
+
+      <div class="row2">
+        <div class="fld">
+          <label>录制画质</label>
+          <div class="sel">
+            <select><option>原画（最高）</option><option>蓝光</option><option>超清</option><option>高清</option><option>标清</option></select>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 9.5l6 6 6-6"/></svg>
+          </div>
+        </div>
+        <div class="fld">
+          <label>保存格式</label>
+          <div class="sel">
+            <select><option>TS（边录边写，最稳）</option><option>MKV</option><option>FLV</option><option>MP4</option><option>MP3 音频</option></select>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 9.5l6 6 6-6"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="optrow">
+        <div class="sw"><i></i></div>
+        <span>使用代理 IP</span>
+        <span class="desc">抖音 / TikTok 取流失败时打开</span>
+      </div>
+      <div class="optrow">
+        <div class="sw on"><i></i></div>
+        <span>分段录制</span>
+        <span class="desc">每 1800 秒切一段，避免单文件过大</span>
+      </div>
+      <div class="optrow">
+        <div class="sw on"><i></i></div>
+        <span>同步采集弹幕</span>
+        <span class="desc">写入 data/danmaku/&lt;平台&gt;/&lt;主播&gt;/&lt;场次&gt;.jsonl</span>
+      </div>
+    </div>
+    <div class="mfoot">
+      <span class="tip">保存后写回 config/URL_config.ini，命令行模式同样生效</span>
+      <div class="spacer"></div>
+      <button class="btn" id="btn-cancel">取消</button>
+      <button class="btn primary">保存并开始</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ────────────────────────────────────────────────
+   原型数据：后续由后端 /api/rooms 替换
+   ──────────────────────────────────────────────── */
+const PLAT = {
+  douyin:   { name: '抖音',  cls: 'douyin',   color: '#fe2c55' },
+  bilibili: { name: 'B站',   cls: 'bilibili', color: '#00a1d6' },
+  huya:     { name: '虎牙',  cls: 'huya',     color: '#ff9600' },
+  douyu:    { name: '斗鱼',  cls: 'douyu',    color: '#ff6d00' }
+};
+
+const rooms = [
+  {
+    id: 1, plat: 'douyin', anchor: '电竞小分队', title: '今晚冲王者！三排上分，来个弹幕助助兴～',
+    status: 'recording', quality: '原画', proxy: true,
+    elapsed: '02:13:45', size: '3.72 GB', bitrate: '4.2 Mb/s', res: '1920×1080', seg: 3,
+    segNow: '18:24', segTotal: '30:00', segPct: 61,
+    file: '电竞小分队_2026-11-24_17-04-33_003.ts',
+    dmCount: 1284, dmOpen: true,
+    dm: [
+      { t: '02:13:38', nick: '路过的风', type: 'chat', text: '这波闪现太秀了' },
+      { t: '02:13:41', nick: '可乐不加冰', type: 'gift', text: '送出 火箭 ×1' },
+      { t: '02:13:44', nick: '星星点灯', type: 'chat', text: '主播今天的麦好清楚' },
+      { t: '02:13:45', nick: '夜色温柔', type: 'like', text: '点赞 ×12' }
+    ]
+  },
+  {
+    id: 2, plat: 'bilibili', anchor: '猫猫教教主', title: '【深夜杂谈】考完试了，来聊聊最近的事',
+    status: 'recording', quality: '超清', proxy: false,
+    elapsed: '00:47:12', size: '2.31 GB', bitrate: '6.8 Mb/s', res: '2560×1440', seg: 1,
+    segNow: '12:31', segTotal: '60:00', segPct: 21,
+    file: '猫猫教教主_2026-11-24_18-31-02_001.mkv',
+    dmCount: 962, dmOpen: false,
+    dm: [
+      { t: '00:47:01', nick: '小羽毛', type: 'chat', text: '终于等到开播了' },
+      { t: '00:47:05', nick: '三次元难民', type: 'chat', text: '这背景音乐叫什么' },
+      { t: '00:47:09', nick: '不吃香菜', type: 'gift', text: '投喂 小花花 ×3' }
+    ]
+  },
+  {
+    id: 3, plat: 'huya', anchor: '阿冷Aleng', title: '连胜挑战 · 今天不拿下十连胜不下播',
+    status: 'recording', quality: '蓝光', proxy: true,
+    elapsed: '05:02:58', size: '8.90 GB', bitrate: '5.0 Mb/s', res: '1920×1080', seg: 7,
+    segNow: '02:58', segTotal: '30:00', segPct: 9,
+    file: '阿冷Aleng_2026-11-24_13-15-16_007.ts',
+    dmCount: 1696, dmOpen: false,
+    dm: [
+      { t: '05:02:40', nick: '老观众', type: 'chat', text: '第七段了兄弟' },
+      { t: '05:02:51', nick: '围观群众甲', type: 'enter', text: '进入直播间' }
+    ]
+  },
+  {
+    id: 4, plat: 'douyu', anchor: '大司马', title: '—— 暂未开播 ——',
+    status: 'waiting', quality: '原画', proxy: false,
+    elapsed: '—', size: '—', bitrate: '—', res: '—', seg: 0,
+    lastLive: '昨天 21:04', watched: '已监测 3 小时 12 分', loop: 60,
+    file: null, dmCount: 0, dmOpen: false, dm: []
+  },
+  {
+    id: 5, plat: 'douyin', anchor: '张同学', title: '冬日第一锅炖菜，柴火灶开火',
+    status: 'stopped', quality: '高清', proxy: false,
+    elapsed: '01:12:33', size: '1.86 GB', bitrate: '2.9 Mb/s', res: '1280×720', seg: 3,
+    segNow: '30:00', segTotal: '30:00', segPct: 100,
+    file: '张同学_2026-11-24_09-02-11_003.mp4',
+    dmCount: 815, dmOpen: false,
+    dm: []
+  },
+  {
+    id: 6, plat: 'douyu', anchor: '一条小团团', title: '（解析失败，未取到直播流）',
+    status: 'error', quality: '原画', proxy: false,
+    elapsed: '—', size: '—', bitrate: '—', res: '—', seg: 0,
+    error: { code: 'HTTP 403 · cookie 已失效', fix: '在「设置 → Cookie」里更新斗鱼 cookie 后重试' },
+    file: null, dmCount: 0, dmOpen: false, dm: []
+  }
+];
+
+/* ── 图标 ───────────────────────────────── */
+const ICON = {
+  play:  '<path d="M8 5.2v13.6c0 .8.9 1.3 1.6.9l10.4-6.8c.6-.4.6-1.4 0-1.8L9.6 4.3C8.9 3.9 8 4.4 8 5.2z"/>',
+  stop:  '<rect x="6.5" y="6.5" width="11" height="11" rx="1.8"/>',
+  pause: '<rect x="7" y="5.5" width="3.6" height="13" rx="1.2"/><rect x="13.4" y="5.5" width="3.6" height="13" rx="1.2"/>',
+  edit:  '<path d="M4 20h4.2L19.1 9.1a2.1 2.1 0 0 0 0-3L17.9 4.9a2.1 2.1 0 0 0-3 0L4 15.8V20z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>',
+  folder:'<path d="M3.5 7.2A1.7 1.7 0 0 1 5.2 5.5h4l2 2.3h7.6a1.7 1.7 0 0 1 1.7 1.7v7.8a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7V7.2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+  eye:   '<path d="M2.5 12s3.6-6.2 9.5-6.2S21.5 12 21.5 12 17.9 18.2 12 18.2 2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+  trash: '<path d="M4.5 6.8h15M9.3 6.8V4.9h5.4v1.9M6.6 6.8l.9 12.1a1.7 1.7 0 0 0 1.7 1.6h5.6a1.7 1.7 0 0 0 1.7-1.6l.9-12.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  doc:   '<path d="M6.5 3.8h6.1l4.9 4.9v11.5a1.6 1.6 0 0 1-1.6 1.6H6.5a1.6 1.6 0 0 1-1.6-1.6V5.4a1.6 1.6 0 0 1 1.6-1.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12.4 4v4.9h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  chev:  '<path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  warn:  '<path d="M12 3.4 22 20.2H2L12 3.4z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="M12 9.4v4.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="17.2" r="1.05" fill="currentColor"/>',
+  clock: '<circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.4V12l3.2 2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>',
+  retry: '<path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v4.2h-4.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+};
+function svg(path, size) {
+  return `<svg viewBox="0 0 24 24" width="${size || 14}" height="${size || 14}" fill="currentColor" stroke="none">${path}</svg>`;
+}
+
+const STATUS_TEXT = { recording: '录制中', waiting: '等待开播', stopped: '已停止', error: '异常' };
+
+function initials(name) {
+  // 取首字，中英通吃
+  const ch = Array.from(name.trim())[0] || '?';
+  return /[a-zA-Z]/.test(ch) ? ch.toUpperCase() : ch;
+}
+
+function avatarStyle(plat, id) {
+  const p = PLAT[plat].color;
+  const grads = {
+    douyin:   `linear-gradient(145deg, ${p}, #7a1b3a)`,
+    bilibili: `linear-gradient(145deg, ${p}, #0b4a68)`,
+    huya:     `linear-gradient(145deg, ${p}, #6b4a10)`,
+    douyu:    `linear-gradient(145deg, ${p}, #6b3208)`
+  };
+  return `background:${grads[plat]}`;
+}
+
+function renderCard(r) {
+  const p = PLAT[r.plat];
+  const rec = r.status === 'recording';
+  const wait = r.status === 'waiting';
+  const err = r.status === 'error';
+
+  const statusHtml = rec
+    ? `<span class="status recording"><i class="dot"></i>录制中 <b>${r.elapsed}</b></span>`
+    : `<span class="status ${r.status}"><i class="dot"></i>${STATUS_TEXT[r.status]}</span>`;
+
+  const tags = [
+    `<span class="tag plat ${p.cls}">${p.name}</span>`,
+    `<span class="tag">${r.quality}</span>`,
+    r.proxy ? `<span class="tag proxy">代理</span>` : ''
+  ].join('');
+
+  let body = '';
+
+  if (rec) {
+    body = `
+      <div class="meter">
+        <div class="row"><span>当前分段 ${r.segNow} / ${r.segTotal}</span><b>第 ${r.seg} 段</b></div>
+        <div class="bar"><i style="width:${r.segPct}%"></i></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">文件大小</div><div class="v">${r.size}</div></div>
+        <div class="stat"><div class="k">码率</div><div class="v">${r.bitrate}</div></div>
+        <div class="stat"><div class="k">分辨率</div><div class="v">${r.res}</div></div>
+        <div class="stat"><div class="k">分段</div><div class="v">${r.seg} 个</div></div>
+      </div>
+      <div class="file">${svg(ICON.doc, 12)}<span>${r.file}</span></div>`;
+  } else if (wait) {
+    body = `
+      <div class="notice waiting">
+        ${svg(ICON.clock, 14)}
+        <div>
+          上次开播 ${r.lastLive} · ${r.watched}
+          <span class="fix" style="color:#b99c62">每 ${r.loop}s 轮询一次；开播后自动开始录制</span>
+        </div>
+      </div>`;
+  } else if (err) {
+    body = `
+      <div class="notice error">
+        ${svg(ICON.warn, 14)}
+        <div>
+          <code>${r.error.code}</code>
+          <span class="fix">${r.error.fix}</span>
+        </div>
+      </div>`;
+  } else {
+    body = `
+      <div class="stats">
+        <div class="stat"><div class="k">总时长</div><div class="v">${r.elapsed}</div></div>
+        <div class="stat"><div class="k">文件大小</div><div class="v">${r.size}</div></div>
+        <div class="stat"><div class="k">分辨率</div><div class="v">${r.res}</div></div>
+        <div class="stat"><div class="k">分段</div><div class="v">${r.seg} 个</div></div>
+      </div>
+      <div class="file">${svg(ICON.doc, 12)}<span>${r.file}</span></div>`;
+  }
+
+  const dmHtml = (r.dm && r.dm.length) ? `
+    <div class="dm ${r.dmOpen ? 'open' : ''}">
+      <div class="dm-head">
+        <span>弹幕</span><span style="color:#4a5468">·</span>
+        <span style="font-variant-numeric:tabular-nums">${r.dmCount} 条</span>
+        ${rec ? '<span class="live"><i></i>LIVE</span>' : ''}
+        <span class="chev">${svg(ICON.chev, 13)}</span>
+      </div>
+      <div class="dm-list">
+        ${r.dm.map(d => `<div class="dmi ${d.type}"><span class="t">${d.t}</span><span class="nick">${d.nick}</span><span class="txt">${d.text}</span></div>`).join('')}
+      </div>
+    </div>` : '';
+
+  const actions = {
+    recording: `
+      <button class="ibtn stop" title="停止录制">${svg(ICON.stop)}</button>
+      <button class="ibtn" title="预览">${svg(ICON.eye)}</button>
+      <button class="ibtn" title="打开目录">${svg(ICON.folder)}</button>
+      <div class="spacer"></div>
+      <button class="ibtn" title="编辑">${svg(ICON.edit)}</button>
+      <button class="ibtn danger" title="删除">${svg(ICON.trash)}</button>`,
+    waiting: `
+      <button class="ibtn" title="立即检测一次">${svg(ICON.retry)}</button>
+      <button class="ibtn" title="暂停监测">${svg(ICON.pause)}</button>
+      <button class="ibtn" title="打开目录">${svg(ICON.folder)}</button>
+      <div class="spacer"></div>
+      <button class="ibtn" title="编辑">${svg(ICON.edit)}</button>
+      <button class="ibtn danger" title="删除">${svg(ICON.trash)}</button>`,
+    error: `
+      <button class="ibtn" title="重试">${svg(ICON.retry)}</button>
+      <button class="ibtn" title="编辑">${svg(ICON.edit)}</button>
+      <div class="spacer"></div>
+      <button class="ibtn danger" title="删除">${svg(ICON.trash)}</button>`,
+    stopped: `
+      <button class="ibtn" title="继续录制">${svg(ICON.play)}</button>
+      <button class="ibtn" title="播放录播">${svg(ICON.eye)}</button>
+      <button class="ibtn" title="打开目录">${svg(ICON.folder)}</button>
+      <div class="spacer"></div>
+      <button class="ibtn danger" title="删除">${svg(ICON.trash)}</button>`
+  }[r.status];
+
+  return `
+  <article class="card ${r.status}">
+    <div class="chead">
+      ${statusHtml}
+      <div class="spacer"></div>
+      <div class="tags">${tags}</div>
+    </div>
+    <div class="who">
+      <div class="avatar" style="${avatarStyle(r.plat, r.id)}">${initials(r.anchor)}</div>
+      <div class="info">
+        <div class="name">${r.anchor}${rec ? `<span class="follow">· 弹幕同步中</span>` : ''}</div>
+        <div class="title">${r.title}</div>
+      </div>
+    </div>
+    ${body}
+    ${dmHtml}
+    <div class="cact">${actions}</div>
+  </article>`;
+}
+
+document.getElementById('grid').innerHTML = rooms.map(renderCard).join('');
+
+/* 弹幕抽屉交互 */
+document.querySelectorAll('.dm-head').forEach(h => {
+  h.addEventListener('click', () => h.parentElement.classList.toggle('open'));
+});
+
+/* 日志 */
+const logs = [
+  { ts: '18:47:33', lv: 'S', msg: '电竞小分队 第 3 段录制中 · 已写入 3.72 GB · 弹幕 1284 条' },
+  { ts: '18:47:31', lv: 'I', msg: '抖音 弹幕连接已建立（room=7258xxxxx，心跳 10s）' },
+  { ts: '18:47:12', lv: 'W', msg: '斗鱼 cookie 校验失败：HTTP 403，等待用户更新 cookie' },
+  { ts: '18:47:02', lv: 'I', msg: '大司马 未开播，将在 60s 后重新检测' },
+  { ts: '18:46:58', lv: 'E', msg: '一条小团团 解析直播流失败：requests.exceptions.HTTPError 403' },
+  { ts: '18:46:40', lv: 'S', msg: '张同学 录制结束，共 3 段 · 01:12:33 · 1.86 GB' }
+];
+document.getElementById('logs').innerHTML = logs.map(l => `
+  <div class="lrow"><span class="ts">${l.ts}</span><span class="lv ${l.lv.toLowerCase()}">${({ S: 'SUCCESS', I: 'INFO', W: 'WARN', E: 'ERROR' })[l.lv]}</span><span class="msg">${l.msg}</span></div>
+`).join('');
+
+/* 添加直播间弹窗 */
+const mask = document.getElementById('mask');
+const openMask = () => mask.classList.add('show');
+const closeMask = () => mask.classList.remove('show');
+document.getElementById('btn-close').onclick = closeMask;
+document.getElementById('btn-cancel').onclick = closeMask;
+mask.addEventListener('click', e => { if (e.target === mask) closeMask(); });
+document.querySelectorAll('.btn.accent').forEach(b => (b.onclick = openMask));
+document.querySelectorAll('.sw').forEach(s => (s.onclick = () => s.classList.toggle('on')));
+if (location.hash === '#add') openMask();
+</script>
+</body>
+</html>

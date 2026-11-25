@@ -1,0 +1,254 @@
+"""配置读写：直接操作上游 data/config/*.ini，保证与命令行版互通。
+
+注意：config.ini 的键是中文，且 RawConfigParser 默认会把键名小写化，
+必须设置 optionxform = str，否则所有 get 都会落空。
+"""
+from __future__ import annotations
+
+import configparser
+import os
+import threading
+from typing import Any
+
+from . import paths
+
+SEC_REC = "录制设置"
+SEC_PUSH = "推送配置"
+SEC_COOKIE = "Cookie"
+SEC_AUTH = "Authorization"
+SEC_ACCOUNT = "账号密码"
+
+# 上游的「键名」里带可选取值，直接当键名用
+K_QUALITY = "原画|超清|高清|标清|流畅"
+K_FORMAT = "视频保存格式ts|mkv|flv|mp4|mp3音频|m4a音频"
+
+QUALITY_CODES = {
+    "原画": "OD",
+    "蓝光": "BD",
+    "超清": "UHD",
+    "高清": "HD",
+    "标清": "SD",
+    "流畅": "LD",
+}
+
+FORMATS = ["ts", "mkv", "flv", "mp4", "mp3", "m4a"]
+
+COOKIE_KEYS = {
+    "douyin": "抖音cookie",
+    "bilibili": "b站cookie",
+    "huya": "虎牙cookie",
+    "douyu": "斗鱼cookie",
+}
+
+
+def _new_parser() -> configparser.RawConfigParser:
+    cp = configparser.RawConfigParser()
+    cp.optionxform = str  # type: ignore[assignment]  # 保留大小写
+    return cp
+
+
+class Config:
+    """线程安全的 ini 读写包装。"""
+
+    def __init__(self, ini_path: str | None = None):
+        self.path = ini_path or os.path.join(paths.config_dir(), "config.ini")
+        self._lock = threading.RLock()
+        self.cp = _new_parser()
+        self.reload()
+
+    def reload(self) -> None:
+        with self._lock:
+            self.cp = _new_parser()
+            if os.path.exists(self.path):
+                self.cp.read(self.path, encoding="utf-8-sig")
+
+    # ---------- 读取 ----------
+    def raw(self, section: str, key: str, default: str = "") -> str:
+        with self._lock:
+            try:
+                val = self.cp.get(section, key)
+            except (configparser.NoSectionError, configparser.NoOptionError):
+                return default
+            return default if val is None else val.strip()
+
+    def get_int(self, section: str, key: str, default: int) -> int:
+        try:
+            return int(self.raw(section, key, str(default)).strip())
+        except (TypeError, ValueError):
+            return default
+
+    def get_bool(self, section: str, key: str, default: bool) -> bool:
+        val = self.raw(section, key, "是" if default else "否").lower()
+        return val in ("是", "true", "1", "yes", "on", "开启")
+
+    # ---------- 写入 ----------
+    def set(self, section: str, key: str, value: Any) -> None:
+        with self._lock:
+            if not self.cp.has_section(section):
+                self.cp.add_section(section)
+            self.cp.set(section, key, str(value))
+
+    def save(self) -> None:
+        with self._lock:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as fh:
+                self.cp.write(fh)
+
+    # ---------- 语义化读取 ----------
+    def quality(self) -> str:
+        q = self.raw(SEC_REC, K_QUALITY, "原画") or "原画"
+        return q if q in QUALITY_CODES else "原画"
+
+    def quality_code(self, quality: str | None = None) -> str:
+        return QUALITY_CODES.get(quality or self.quality(), "OD")
+
+    def save_format(self) -> str:
+        fmt = (self.raw(SEC_REC, K_FORMAT, "ts") or "ts").strip().lower()
+        return fmt if fmt in FORMATS else "ts"
+
+    def split_enabled(self) -> bool:
+        return self.get_bool(SEC_REC, "分段录制是否开启", True)
+
+    def split_seconds(self) -> int:
+        return max(60, self.get_int(SEC_REC, "视频分段时间(秒)", 1800))
+
+    def loop_interval(self) -> int:
+        return max(10, self.get_int(SEC_REC, "循环时间(秒)", 300))
+
+    def check_interval(self) -> int:
+        """无人值守时的开播检测间隔（秒），默认 60。"""
+        return max(20, min(3600, self.get_int(SEC_REC, "开播检测间隔(秒)", 60)))
+
+    def concurrent(self) -> int:
+        return max(1, self.get_int(SEC_REC, "同一时间访问网络的线程数", 5))
+
+    def folder_by_author(self) -> bool:
+        return self.get_bool(SEC_REC, "保存文件夹是否以作者区分", True)
+
+    def save_root(self) -> str:
+        custom = self.raw(SEC_REC, "直播保存路径(不填则默认)", "")
+        if custom:
+            try:
+                os.makedirs(custom, exist_ok=True)
+                return custom
+            except OSError:
+                pass
+        return paths.default_download_dir()
+
+    def proxy_enabled(self) -> bool:
+        """代理开关：要求「是」且代理地址非空，避免空地址被当成开启。"""
+        if not self.get_bool(SEC_REC, "是否使用代理ip(是/否)", False):
+            return False
+        return bool(self.proxy_addr().strip())
+
+    def proxy_addr(self) -> str:
+        return self.raw(SEC_REC, "代理地址", "")
+
+    def cookie(self, platform: str) -> str:
+        return self.raw(SEC_COOKIE, COOKIE_KEYS.get(platform, ""), "")
+
+    def proxy_for(self, platform: str) -> str:
+        """返回该平台解析时该用的代理地址（空串表示不走代理）。"""
+        if not self.proxy_enabled():
+            return ""
+        use_list = self.raw(SEC_REC, "使用代理录制的平台(逗号分隔)", "")
+        if use_list:
+            names = [x.strip() for x in use_list.replace("，", ",").split(",") if x.strip()]
+            if platform not in names:
+                return ""
+        return self.proxy_addr()
+
+    # ---------- 面向界面的快照 ----------
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "quality": self.quality(),
+            "saveFormat": self.save_format(),
+            "saveRoot": self.save_root(),
+            "splitEnabled": self.split_enabled(),
+            "splitSeconds": self.split_seconds(),
+            "loopInterval": self.loop_interval(),
+            "checkInterval": self.check_interval(),
+            "concurrent": self.concurrent(),
+            "folderByAuthor": self.folder_by_author(),
+            "proxyEnabled": self.proxy_enabled(),
+            "proxyAddr": self.proxy_addr(),
+            "cookies": {p: self.cookie(p) for p in COOKIE_KEYS},
+            "ffmpeg": paths.ffmpeg_exe(),
+        }
+
+    def apply_dict(self, data: dict[str, Any]) -> None:
+        if "quality" in data and data["quality"] in QUALITY_CODES:
+            self.set(SEC_REC, K_QUALITY, data["quality"])
+        if "saveFormat" in data and str(data["saveFormat"]).lower() in FORMATS:
+            self.set(SEC_REC, K_FORMAT, str(data["saveFormat"]).lower())
+        if "saveRoot" in data:
+            self.set(SEC_REC, "直播保存路径(不填则默认)", str(data["saveRoot"] or ""))
+        if "splitEnabled" in data:
+            self.set(SEC_REC, "分段录制是否开启", "是" if data["splitEnabled"] else "否")
+        if "splitSeconds" in data:
+            self.set(SEC_REC, "视频分段时间(秒)", int(data["splitSeconds"]))
+        if "loopInterval" in data:
+            self.set(SEC_REC, "循环时间(秒)", int(data["loopInterval"]))
+        if "checkInterval" in data and data["checkInterval"]:
+            self.set(SEC_REC, "开播检测间隔(秒)", int(data["checkInterval"]))
+        if "concurrent" in data:
+            self.set(SEC_REC, "同一时间访问网络的线程数", int(data["concurrent"]))
+        if "folderByAuthor" in data:
+            self.set(SEC_REC, "保存文件夹是否以作者区分", "是" if data["folderByAuthor"] else "否")
+        if "proxyEnabled" in data:
+            self.set(SEC_REC, "是否使用代理ip(是/否)", "是" if data["proxyEnabled"] else "否")
+        if "proxyAddr" in data:
+            self.set(SEC_REC, "代理地址", str(data["proxyAddr"] or ""))
+        cookies = data.get("cookies") or {}
+        for platform, val in cookies.items():
+            key = COOKIE_KEYS.get(platform)
+            if key:
+                self.set(SEC_COOKIE, key, str(val or ""))
+        self.save()
+
+
+# ---------- URL_config.ini：房间清单（与命令行版互通） ----------
+
+def parse_url_config(path: str | None = None) -> list[dict[str, Any]]:
+    """解析一行一个直播间的 URL_config.ini。
+
+    行格式：画质,URL,主播: 名字   行首 # 表示停用但仍轮询。
+    """
+    target = path or os.path.join(paths.config_dir(), "URL_config.ini")
+    out: list[dict[str, Any]] = []
+    if not os.path.exists(target):
+        return out
+    with open(target, "r", encoding="utf-8-sig") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            enabled = True
+            if line.startswith("#"):
+                enabled = False
+                line = line.lstrip("#").strip()
+                if not line:
+                    continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            quality, url = parts[0], parts[1]
+            anchor = parts[2] if len(parts) > 2 else ""
+            if anchor.startswith("主播:"):
+                anchor = anchor[3:].strip()
+            if not url.startswith("http"):
+                continue
+            out.append({"quality": quality, "url": url, "anchor": anchor, "enabled": enabled})
+    return out
+
+
+def write_url_config(rooms: list[dict[str, Any]], path: str | None = None) -> None:
+    target = path or os.path.join(paths.config_dir(), "URL_config.ini")
+    lines = ["# 由 LiveRec 控制台维护；格式：画质,URL,主播: 名字（行首 # 为停用）"]
+    for room in rooms:
+        anchor = (room.get("anchor") or "").strip()
+        body = f"{room.get('quality') or '原画'},{room.get('url')},主播: {anchor}"
+        lines.append(("" if room.get("enabled", True) else "#") + body)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")

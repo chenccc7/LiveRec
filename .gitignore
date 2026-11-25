@@ -1,0 +1,30 @@
+# 运行时产物 / 本地数据（绝不提交，里面含真实 Cookie）
+data/
+dist/
+build/
+_backup/
+tmp/
+logs/
+*.log
+
+# 内嵌二进制（体积大，用 tools\fetch_*.ps1 拉取）
+bin/*.exe
+bin/*.dll
+bin/ffmpeg.*
+
+# 上游核心代码（另一个 MIT 项目，用 tools\fetch_core.ps1 拉取，不重复托管）
+core/
+
+# Python / 编辑器
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+
+# 打包产物
+*.spec.bak
+dist.rar
+*.7z

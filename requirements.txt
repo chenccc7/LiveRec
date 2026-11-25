@@ -1,0 +1,16 @@
+# 运行期依赖
+fastapi
+uvicorn[standard]
+loguru
+httpx
+brotli
+protobuf
+requests
+websockets
+py-mini-racer     # 抖音弹幕签名（内置 V8，执行 liverec/danmaku/assets/sign.js）
+PyExecJS ; sys_platform == "win32"
+
+# 打包 / 构建期
+pyinstaller
+pillow            # 只用来生成 bin/liverec.ico，运行期不需要
+grpcio-tools      # 只在改 douyin.proto 后重新生成 douyin_pb2.py 时需要
