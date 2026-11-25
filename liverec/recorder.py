@@ -588,7 +588,7 @@ class RecordTask:
                     )
                 # 一个字节都没出：这条线路就是死的（403/秒断/挂住），
                 # 直接结束这一段，回到「等待开播」，不换线路、也不报错。
-                first_wait = 8.0 if self.platform == "huya" else 20.0
+                first_wait = 25.0 if self.platform == "huya" else 20.0
                 if self.size <= 0 and time.time() - attempt_started > first_wait:
                     self._no_data = True
                     log("WARN", f"{anchor} {int(first_wait)} 秒没有收到任何数据，回到等待开播")
