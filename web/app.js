@@ -233,18 +233,6 @@ function mergeRooms(list) {
 }
 
 /* ── 页面渲染：概览 / 页脚 / 日志 ──────────────────── */
-async function toggleRoomUnattended(rid, next) {
-  try {
-    await api(`/api/rooms/${rid}`, { method: 'PATCH', body: { unattended: next } });
-    const room = S.rooms.find(r => String(r.id) === String(rid));
-    if (room) room.unattended = next;
-    pushLocalLog('INFO',
-      next ? '该直播间已开启无人值守：下次启动会自动进入开播监测' : '该直播间已关闭无人值守：下次启动不再自动监测');
-    renderAll();
-  } catch (err) {
-    pushLocalLog('ERROR', `切换无人值守失败：${err.message}`);
-  }
-}
 
 async function toggleRoomDanmaku(rid, next) {
   try {
@@ -405,11 +393,7 @@ function renderCard(r0) {
         : '弹幕录制：已关闭（点击开启，切换时会重启录制任务）'}">
        <i class="autodot"></i>${r.danmaku ? '弹幕' : '无弹幕'}</button>`,
     // 每张卡片各自的无人值守开关：开着 = 下次启动会自动进入开播监测
-    `<button class="tag auto${r.unattended ? ' on' : ''}" data-act="auto"
-       title="${r.unattended
-        ? '无人值守：已开启，程序启动时会自动监测该直播间（点击关闭）'
-        : '无人值守：已关闭，程序启动时不会自动监测（点击开启）'}">
-       <i class="autodot"></i>${r.unattended ? '自动' : '手动'}</button>`
+    ``
   ].join('');
 
   let body = '';
@@ -465,7 +449,7 @@ function renderCard(r0) {
   const dmHtml = (rec || dmCount > 0) ? `
     <div class="dm ${S.dmOpen.has(String(r.id)) ? 'open' : ''}">
       <div class="dm-head">
-        <span>弹幕</span><span style="color:#4a5468">·</span>
+        <span>弹幕</span>
         <span style="font-variant-numeric:tabular-nums" data-f="dmcount">${fmtNum(dmCount)} 条</span>
         <span class="t" style="color:#5b6579;font-size:11px">${DM_TEXT[dmStatus] || ''}</span>
         ${dmOn ? '<span class="live"><i></i>LIVE</span>' : ''}
@@ -660,15 +644,6 @@ $('#grid').addEventListener('click', async ev => {
   }
 
   // 卡片标签里的「自动 / 手动」：每张卡独立的无人值守开关
-  const autoBtn = ev.target.closest('[data-act="auto"]');
-  if (autoBtn) {
-    const card = autoBtn.closest('.card');
-    const rid = String(card.dataset.id);
-    const room = S.rooms.find(r => String(r.id) === rid) || {};
-    autoBtn.disabled = true;
-    await toggleRoomUnattended(rid, !room.unattended);
-    return;
-  }
 
   const btn = ev.target.closest('.ibtn');
   if (!btn) return;
@@ -1075,6 +1050,7 @@ function openSettings() {
           <input data-st="saveRoot" value="${escapeHtml(st.saveRoot || '')}" placeholder="downloads" spellcheck="false"></label>
         <label class="fld" style="grid-column:1/-1"><span>弹幕保存路径（留空 = 跟随每场录像目录下的 danmaku/）</span>
           <input data-st="danmakuRoot" value="${escapeHtml(st.danmakuRoot || '')}" placeholder="留空则跟随视频目录" spellcheck="false"></label>
+          <label class="fld" style="grid-column:1/-1"><span>虎牙分片合并临时目录（留空 = 程序 data/merge-tmp）</span>          <input data-st="tempDir" value="${escapeHtml(st.tempDir || '')}" placeholder="留空则用程序 data 下的 merge-tmp" spellcheck="false"></label>
         <label class="fld ckfld" style="grid-column:1/-1"><span>ffmpeg 路径（留空 = 用内置的）</span>
           <input data-st="ffmpegPath" value="${escapeHtml(st.ffmpegPath || '')}" placeholder="${escapeHtml(st.ffmpeg || 'bin\\ffmpeg.exe')}" spellcheck="false">
           <em class="ckout" style="color:#7b8698" title="${escapeHtml(st.ffmpeg || '')}">当前生效：${escapeHtml(st.ffmpeg || '未找到')}</em></label>

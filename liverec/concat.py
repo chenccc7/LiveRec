@@ -54,6 +54,24 @@ def _run(cmd: list[str], timeout: float = 3600.0) -> tuple[int, str]:
     return res.returncode, (res.stderr or "").strip()
 
 
+def temp_root() -> str:
+    """拼接用的临时目录：优先用设置里指定的，否则 data/merge-tmp。"""
+    try:
+        from .config import Config
+        from . import paths as _paths
+        cfg = Config(os.path.join(_paths.config_dir(), "config.ini"))
+        root = cfg.temp_dir()
+    except Exception:
+        from . import paths as _paths
+        root = os.path.join(_paths.data_dir(), "merge-tmp")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except OSError:
+        root = os.path.join(_paths.data_dir(), "merge-tmp")
+        os.makedirs(root, exist_ok=True)
+    return root
+
+
 def probe_duration(path: str) -> float:
     """用 ffmpeg -i 的输出抓时长（秒），拿不到返回 0。"""
     if not os.path.isfile(path):

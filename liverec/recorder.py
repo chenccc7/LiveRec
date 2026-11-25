@@ -391,14 +391,7 @@ class RecordTask:
                     if changed.get("is_live") and changed.get("record_url"):
                         info = changed
 
-            try:
-                await asyncio.wait_for(
-                    self._record_once(info["record_url"], info.get("lines") or []),
-                    timeout=900 if self.platform == "huya" else 6 * 3600,
-                )
-            except asyncio.TimeoutError:
-                log("WARN", f"{self.anchor or self.url} 这一段超过 15 分钟没有收尾，强制重启录制")
-                await self._kill_proc()
+            await self._record_once(info["record_url"], info.get("lines") or [])
             if self._stop.is_set():
                 return
             if self._no_data and not (self.platform == "huya" and self.size > 0):
