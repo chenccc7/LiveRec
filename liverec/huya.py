@@ -653,18 +653,30 @@ def resolve(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "
         "proxy": proxy,
     }
 
-    quality_name = str((picked or {}).get("name") or quality_code)
+    quality_name = str((picked or {}).get("name") or "")
     canonical = _name_to_quality(quality_name) or "原画"
+    # 「有没有降级」只看两件事：拿到的码率是不是这房间的最高档，或者档位名换算后
+    # 与所选的一类相同（原画/蓝光/…）。最高档永远不会被判成降级——虎牙的「原画」
+    # 在接口里通常叫「蓝光20M」这种名字，早先按字符串前缀比会误报。
+    max_bits = int(rows[0]["bitrate"]) if rows else 0
+    picked_bits = int((picked or {}).get("bitrate") or 0)
+    want_canonical = _name_to_quality(str(quality_code)) or ""
+    is_top = picked_bits > 0 and picked_bits >= max_bits
+    if is_top or (want_canonical and want_canonical == canonical):
+        note = ""
+    elif want_canonical:
+        note = f"这个直播间没有「{quality_code}」这类档位，已按「{quality_name}」录制（实际画质：{canonical}）"
+    elif quality_name and quality_name != str(quality_code):
+        note = f"没找到「{quality_code}」这一档，已按「{quality_name}」录"
+    else:
+        note = ""
     result.update({
         "record_url": chosen["url"],
         "flv_url": chosen["url"] if chosen["format"] == "flv" else "",
         "m3u8_url": chosen["url"] if chosen["format"] == "hls" else "",
         "lines": [c["url"] for c in ordered[:4]],
         "quality_actual": canonical,
-        "quality_note": (
-            "" if quality_name.startswith(str(quality_code)[:2]) or quality_name == quality_code
-            else f"虎牙这房间当前只有「{quality_name}」这一档，已按它录"
-        ),
+        "quality_note": note,
         "cdn": chosen["cdn"],
         "format": chosen["format"],
     })
