@@ -6,11 +6,12 @@ import contextlib
 import os
 import re
 import shutil
+import threading
 import time
 from datetime import datetime
 from typing import Any, Callable
 
-from . import paths, resolver
+from . import concat, paths, resolver
 from .hlsproxy import HlsProxy
 from .logbook import log
 
@@ -98,6 +99,7 @@ class RecordTask:
         # 虎牙分片续录的连续失败计数：连续几段都拿不到数据时要退避，别把 CDN 当刷量
         self._huya_streak = 0
         self._chunk_index = 0
+        self._parts: list[str] = []
         self.error = ""
         self.started_at = 0.0
         self.elapsed = 0.0
@@ -193,6 +195,7 @@ class RecordTask:
         self._base_bytes = 0
         self._huya_streak = 0
         self._chunk_index = 0
+        self._parts: list[str] = []
         self.size = 0
         self.size_text = "0 B"
         self.bitrate = ""
@@ -228,6 +231,9 @@ class RecordTask:
         self._loop_task = None
         self.status = status
         self.next_check_at = 0.0
+        # 停止按钮/删卡片时也要把这次直播的分段拼起来，否则用户只拿到一堆零散文件
+        self._remember_part()
+        self._finish_session()
         self.push(force=True)
         if was_recording:
             # 停录默认是「静默」的，出问题时看不出录音是谁停的；记一条便于排查。
@@ -382,6 +388,7 @@ class RecordTask:
                 if chunk >= 300 * 1024:
                     self._huya_streak = 0
                     self._chunk_index += 1
+                    self._remember_part()
                     self._base_bytes = self.size
                     self.status = "recording"
                     self.error = ""
@@ -409,6 +416,7 @@ class RecordTask:
                         self._huya_streak = 0
                     self._huya_streak += 1
                     if self._huya_streak <= 6:
+                        self._remember_part()
                         self._base_bytes = self.size
                         self._stalled = False
                         self.status = "recording"
@@ -426,6 +434,7 @@ class RecordTask:
                 # 无数据看门狗：不报错，回到等待开播；断流大多是线路被掐，
                 # 先按短间隔重试（15 秒），让换线/重连尽快生效。
                 await self._stop_danmaku()
+                self._finish_session()
                 interval = min(15.0, float(cfg.check_interval()))
                 self.status = "waiting"
                 self.error = ""
@@ -435,6 +444,8 @@ class RecordTask:
                 continue
             # 录制结束（主播下播/断流）：稍等再回到轮询
             await self._stop_danmaku()
+            self._remember_part()
+            self._finish_session()
             log(
                 "INFO",
                 f"{self.anchor or self.url} 本段录制结束（{self.size_text}），"
@@ -483,15 +494,25 @@ class RecordTask:
         self._files_prefix = prefix
         ext = {"ts": "ts", "mkv": "mkv", "flv": "flv", "mp4": "mp4",
                "mp3": "mp3", "m4a": "m4a"}.get(fmt, "ts")
-        if split:
-            out_pattern = os.path.join(out_dir, f"{prefix}_%03d.{ext}")
-        else:
-            out_pattern = os.path.join(out_dir, f"{prefix}.{ext}")
-
+        chunk_fmt = fmt
+        if self.platform == "huya" and ext in ("ts", "mkv", "mp4"):
+            # 虎牙原生就是 FLV，分段直接用 FLV 落盘最稳（-c copy 不必重打 TS），
+            # 等这场直播结束再拼接、按用户选的格式转一次。
+            ext = "flv"
+            chunk_fmt = "flv"
         candidates: list[str] = [stream_url]
         for alt in lines or []:
             if alt and alt not in candidates:
                 candidates.append(alt)
+
+        def make_pattern(index: int) -> str:
+            # 每条候选线路用独立文件名：否则后一条线路重开会把前一条已录的数据覆盖掉，
+            # 表现就是「录了一会儿文件变小/前面内容没了」。
+            stem = prefix if index == 0 else f"{prefix}_{index + 1}"
+            name = f"{stem}_%03d.{ext}" if split else f"{stem}.{ext}"
+            return os.path.join(out_dir, name)
+
+        out_pattern = make_pattern(0)
 
         self.started_at = time.time()
         self._live_since = time.time()
@@ -522,7 +543,9 @@ class RecordTask:
                                      cookie=self.cfg.cookie(self.platform),
                                      proxy_addr=self.cfg.proxy_for(self.platform))
             target = proxy.local_url if proxy else candidate
-            cmd = self._build_cmd(target, out_pattern, fmt, split, split_time,
+            out_pattern = make_pattern(index)
+            self.current_file = os.path.basename(out_pattern.replace("%03d", "000"))
+            cmd = self._build_cmd(target, out_pattern, chunk_fmt, split, split_time,
                                   allow_any_ext=bool(proxy))
             try:
                 spawn_kwargs: dict[str, Any] = {}
@@ -593,6 +616,9 @@ class RecordTask:
 
             # 这一段新录到的字节（要减掉之前的累计，否则第二段一开始就「健康」）
             chunk_bytes = self.size - self._base_bytes
+            # 这一段已经落盘（哪怕是被 CDN 掐断的），记下来供收尾时拼接
+            if chunk_bytes > 0:
+                self._remember_part()
             # 虎牙的分片很小（3 个分片 ≈ 1.4MB、3 秒就 EOF），阈值按「有数据」来判，
             # 不能再用 2MB/20 秒，否则每段都被当成失败、不断换线。
             healthy = code in (0, None) and (chunk_bytes > 512 * 1024 or self.elapsed >= 20)
@@ -636,6 +662,48 @@ class RecordTask:
                     os.remove(path)
         except OSError:
             pass
+
+    def _remember_part(self) -> None:
+        """把刚录完的那一段记下来，等这场直播结束统一拼接成一个文件。"""
+        name = self.current_file
+        if not name:
+            return
+        path = os.path.join(self.out_dir, name)
+        if not os.path.isfile(path):
+            log("WARN", f"{self.anchor or self.url} 分段文件不存在，跳过拼接记录：{name}")
+            return
+        size = os.path.getsize(path)
+        if size <= 0:
+            log("WARN", f"{self.anchor or self.url} 分段是空文件，跳过拼接记录：{name}")
+            return
+        if path not in self._parts:
+            self._parts.append(path)
+            log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
+                        f"（{_fmt_size(size)}）：{name}")
+
+    def _finish_session(self) -> None:
+        """这场直播结束（下播/停录/被限流）时，把分段拼成一个完整文件。"""
+        parts = [p for p in self._parts if os.path.isfile(p)]
+        self._parts = []
+        if len(parts) < 2:
+            if parts:
+                log("INFO", f"{self.anchor or self.url} 本次只有 1 个分段，无需拼接")
+            return
+        first = os.path.basename(parts[0])
+        stem = re.sub(r"(_\d+)+\.(ts|mkv|flv|mp4)$", "", first) or (self.anchor or "session")
+        ext = "flv" if self.platform == "huya" else "ts"
+        out = os.path.join(self.out_dir, f"{stem}_merged.{ext}")
+        target_fmt = ""
+        try:
+            target_fmt = self.cfg.save_format()
+        except Exception:  # noqa: BLE001
+            target_fmt = ""
+        threading.Thread(
+            target=concat.merge_session,
+            args=(parts, out, False, target_fmt),
+            daemon=True,
+            name="concat",
+        ).start()
 
     def _sweep_empty_files(self) -> None:
         """扫一遍本房间的输出目录，删掉 0 字节的空壳文件。

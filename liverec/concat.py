@@ -1,0 +1,201 @@
+"""分段录像的拼接与转封装。
+
+虎牙这类平台每几十秒就要换一次签名地址，录出来的是一场直播里的多个分段
+（每段各自从 0 开始计时）。直接 `-f concat -c copy` 拼 FLV 会因为各段时间轴
+互不相干而只拼出第一段的长度，所以这里先逐段归一化成 TS（重置时间轴），
+再用 concat 拼接，最后按用户选的容器转封装。
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+
+from . import paths
+from .logbook import log
+
+_DUR_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+_FORMAT_EXT = {
+    "ts": "ts",
+    "mkv": "mkv",
+    "flv": "flv",
+    "mp4": "mp4",
+    "mp3音频": "mp3",
+    "m4a音频": "m4a",
+}
+
+_TARGET_TEMPLATE = {
+    "ts": ["-f", "mpegts"],
+    "mkv": ["-f", "matroska"],
+    "flv": ["-f", "flv"],
+    "mp4": ["-movflags", "+faststart", "-f", "mp4"],
+    "mp3": ["-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"],
+    "m4a": ["-vn", "-c:a", "aac", "-b:a", "192k", "-f", "ipod"],
+}
+
+
+def _ffmpeg() -> str:
+    return paths.ffmpeg_exe() or "ffmpeg"
+
+
+def _run(cmd: list[str], timeout: float = 3600.0) -> tuple[int, str]:
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return -1, f"{type(exc).__name__}: {exc}"
+    return res.returncode, (res.stderr or "").strip()
+
+
+def probe_duration(path: str) -> float:
+    """用 ffmpeg -i 的输出抓时长（秒），拿不到返回 0。"""
+    if not os.path.isfile(path):
+        return 0.0
+    code, err = _run([_ffmpeg(), "-hide_banner", "-i", path], timeout=120)
+    if code < 0:
+        return 0.0
+    match = _DUR_RE.search(err)
+    if not match:
+        return 0.0
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _normalize(part: str, out: str) -> tuple[bool, str]:
+    """把一段录好的文件重新封装成时间轴从 0 开始的 TS。
+
+    分段可能是被 CDN 掐断的残缺文件，所以先常规转一次，失败再放宽错误容忍
+    重试一次（`-err_detect ignore_err` 能救回大部分「末尾不完整」的 FLV）。
+    """
+    attempts = [
+        ["-fflags", "+genpts", "-i", part],
+        ["-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt", "-i", part],
+    ]
+    last = ""
+    for extra in attempts:
+        code, err = _run([
+            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+            *extra, "-c", "copy", "-avoid_negative_ts", "make_zero", "-f", "mpegts", out,
+        ])
+        ok = code == 0 and os.path.isfile(out) and os.path.getsize(out) > 0
+        if ok and probe_duration(out) > 0.2:
+            return True, ""
+        last = " | ".join(err.splitlines()[-3:]) or f"产出为空（rc={code}）"
+        with contextlib.suppress(OSError):
+            os.remove(out)
+    return False, last
+
+
+def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
+    """把一场直播的多个分段拼成一个 TS 文件，返回 (是否成功, 说明)。"""
+    parts = [p for p in parts if os.path.isfile(p) and os.path.getsize(p) > 0]
+    if not parts:
+        return False, "没有可用分段"
+    if len(parts) == 1:
+        ok, detail = _normalize(parts[0], out)
+        if not ok:
+            return False, f"单段重封装失败：{detail}"
+        return True, f"{probe_duration(out):.1f} 秒"
+
+    # 临时目录放在程序自己的 data 下：Windows 沙箱/受控环境里 ffmpeg 往往写不进
+    # %TEMP%（会报 Permission denied），而 data 目录一定可写。
+    tmp_root = os.path.join(paths.data_dir(), "merge-tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="m-", dir=tmp_root)
+    try:
+        normalized: list[str] = []
+        total = 0.0
+        for index, part in enumerate(parts):
+            target = os.path.join(tmp_dir, f"p{index:03d}.ts")
+            ok, detail = _normalize(part, target)
+            if not ok:
+                log("WARN", f"分段 {os.path.basename(part)} 无法重封装，已跳过：{detail}")
+                continue
+            total += probe_duration(target)
+            normalized.append(target)
+        if not normalized:
+            return False, "所有分段都无法重封装"
+
+        list_path = os.path.join(tmp_dir, "list.txt")
+        with open(list_path, "w", encoding="utf-8", newline="\n") as handle:
+            for item in normalized:
+                handle.write("file '" + item.replace("'", "'\\''") + "'\n")
+
+        merged_tmp = os.path.join(tmp_dir, "merged.ts")
+        code, err = _run([
+            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c", "copy", "-f", "mpegts", merged_tmp,
+        ])
+        if code != 0 or not os.path.isfile(merged_tmp):
+            return False, "拼接失败：" + (" | ".join(err.splitlines()[-3:]) or "未知错误")
+
+        got = probe_duration(merged_tmp)
+        os.replace(merged_tmp, out)
+        if total and got < total * 0.8:
+            return True, f"{got:.1f} 秒（分段合计 {total:.1f} 秒，部分分段可能已损坏）"
+        return True, f"{got:.1f} 秒"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def remux(src: str, fmt: str) -> tuple[bool, str]:
+    """把拼接好的中间文件转成用户选的容器（流拷贝，不重新编码）。"""
+    ext = _FORMAT_EXT.get(fmt, "")
+    if not ext or src.lower().endswith("." + ext):
+        return True, "无需转换"
+    out = os.path.splitext(src)[0] + "." + ext
+    extra = _TARGET_TEMPLATE.get(ext, [])
+    code, err = _run([
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        "-i", src, "-c", "copy", *extra, out,
+    ])
+    if code != 0 or not os.path.isfile(out) or os.path.getsize(out) <= 0:
+        with contextlib.suppress(OSError):
+            os.remove(out)
+        return False, "转封装失败：" + (" | ".join(err.splitlines()[-3:]) or "未知错误")
+    with contextlib.suppress(OSError):
+        os.remove(src)
+    return True, os.path.basename(out)
+
+
+def merge_session(parts: list[str], out: str, keep_parts: bool = False,
+                  target_fmt: str = "") -> None:
+    """后台线程入口：拼接 + 记日志 + 视情况清理分段，可选再转成目标容器。"""
+    label = os.path.basename(out)
+    if len(parts) < 2:
+        return
+    log("INFO", f"{label} 开始拼接 {len(parts)} 个分段…")
+    ok, detail = merge_parts(parts, out)
+    if not ok:
+        log("WARN", f"{label} 拼接失败（分段已保留）：{detail}")
+        return
+    log("SUCCESS", f"{label} 拼接完成，时长 {detail}")
+    if target_fmt:
+        ok2, detail2 = remux(out, target_fmt)
+        if not ok2:
+            log("WARN", f"{label} 转成「{target_fmt}」失败，保留拼接文件：{detail2}")
+        elif detail2 != "无需转换":
+            log("SUCCESS", f"{label} 已转成 {detail2}")
+    if not keep_parts:
+        for part in parts:
+            try:
+                if os.path.abspath(part) != os.path.abspath(out):
+                    os.remove(part)
+            except OSError:
+                pass
+
+
+async def _amain() -> None:  # pragma: no cover - 手工调试用
+    await asyncio.sleep(0)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    asyncio.run(_amain())
