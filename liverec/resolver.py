@@ -1025,6 +1025,24 @@ def _huya_sign_url(line_b64: str) -> str | None:
 
 
 _huya_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def drop_cache(url: str) -> None:
+    """清掉某个直播间的解析缓存（虎牙的地址几十秒就过期，续录前必须拿新的）。"""
+    global _huya_cache  # noqa: PLW0603
+    room = ""
+    try:
+        match = re.search(r"huya\.com/([^/?#]+)", url or "")
+        if match:
+            room = match.group(1)
+    except Exception:  # noqa: BLE001
+        room = ""
+    if not room:
+        return
+    _huya_cache.pop(room, None)
+    # 线路表也要一起丢：里面存的是带 wsSecret 的旧地址，重签也只能续一小会儿。
+    for key in [k for k in _huya_mp_cache if k.split("|", 1)[0] == room]:
+        _huya_mp_cache.pop(key, None)
 _huya_preferred: dict[str, int] = {}
 _HUYA_CACHE_TTL = 10.0
 
@@ -1065,24 +1083,9 @@ def _resolve_huya(url: str, quality_code: str, cookie: str, proxy: str) -> dict[
         candidates = [c for c in candidates if c.startswith("http")]
         if not candidates:
             raise ResolveError("虎牙未返回可用直播流（可能是付费/加密频道，或该房间已切到未支持的线路）")
-        # 各路 CDN 在同一时刻的可用性不一样（实测常是 hs 通、al/tx 403），
-        # 而且 wsSecret 可以本地重算，所以这里可以放心逐条「重签 + 探一下」挑出能用的那条。
-        # 优先挑「直接给分片的 media 播放列表」的线路：虎牙有些线路返回 master，
-        # 跟一跳拿到的子列表常常是 3 个分片、不滚动的死窗口，录 3 秒就 EOF。
-        media_index = -1
-        for index, candidate in enumerate(candidates[:6]):
-            signed = _huya_resign(candidate) or candidate
-            if "#EXTINF" in _huya_playlist_text(signed, proxy):
-                media_index = index
-                break
-        if media_index >= 0:
-            candidates.insert(0, candidates.pop(media_index))
-        else:
-            for index, candidate in enumerate(candidates[:6]):
-                signed = _huya_resign(candidate) or candidate
-                if _huya_url_alive(signed, proxy):
-                    candidates.insert(0, candidates.pop(index))
-                    break
+        # 注意：虎牙的签名地址基本是「一次性」的——用 GET 探一次，ffmpeg 再拉就是 403。
+        # 所以这里绝不去预读播放列表/探活，只按 CDN 稳定性排序，交给录制端逐个试，
+        # 由 HLS 中转在每次刷新时重新签名（见 liverec/hlsproxy.py）。
         pref = _huya_preferred.get(room, 0) % len(candidates)
         order = candidates[pref:] + candidates[:pref]
         result.update({"quality": quality_code, "flv_url": order[0], "record_url": order[0],

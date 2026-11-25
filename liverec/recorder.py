@@ -47,11 +47,6 @@ def _start_hls_proxy(url: str, platform: str, room_url: str = "",
     """m3u8 地址才需要本地中转（把分片的相对 URI 改写成带签名的绝对地址）。"""
     if ".m3u8" not in url.lower():
         return None
-    if platform == "huya":
-        # 虎牙不走中转：实测「接口新签的地址直连」能正常录（5 秒 481KB），而经中转反而
-        # 常在第一条线路就 403（中转的刷新节奏会打乱 CDN 的验签）。签名几十秒就过期，
-        # 交给外层「分片续录」每段重新解析一条新地址即可。
-        return None
     headers = {"User-Agent": UA}
     if platform == "bilibili":
         headers["Referer"] = "https://live.bilibili.com/"
@@ -279,6 +274,10 @@ class RecordTask:
             try:
                 # 解析卡死会让整张卡永远停在「等待开播」且毫无日志，这里硬性限时：
                 # 虎牙的 CDN 偶尔回一条不结束的响应，线程里的 requests 会一直挂着。
+                if self.platform == "huya":
+                    # 虎牙的 wsSecret 只有 20–30 秒有效期，分片续录必须重新拿地址，
+                    # 否则会一直复用缓存里那条已经过期的 URL（表现就是「录着录着停住」）。
+                    resolver.drop_cache(self.url)
                 info = await asyncio.wait_for(
                     resolver.resolve(
                         self.url,
@@ -377,6 +376,9 @@ class RecordTask:
                     self.push(force=True)
                     await self._wait(1.5)
                     continue
+                # 这一段什么都没录到（CDN 拒绝/中转失败）：把 0 字节的空壳清掉，
+                # 免得目录里堆一堆 0KB 的 .ts，看着像「录了但没数据」。
+                self._sweep_empty_files()
             if self._stalled:
                 if self.platform == "huya" and self.size > 0:
                     # 虎牙：签名到期被掐断是常态，立刻换新签名续录，卡片保持「录制中」，
@@ -595,6 +597,23 @@ class RecordTask:
                     continue
                 path = os.path.join(out_dir, name)
                 if os.path.isfile(path) and os.path.getsize(path) == 0:
+                    os.remove(path)
+        except OSError:
+            pass
+
+    def _sweep_empty_files(self) -> None:
+        """扫一遍本房间的输出目录，删掉 0 字节的空壳文件。
+
+        虎牙「分片续录」每段都会新建一个文件，CDN 偶尔一两段直接拒绝，
+        留着 0KB 的 .ts 会让人以为「录了却没数据」，也干扰体积统计。
+        """
+        out_dir = self.out_dir
+        if not out_dir:
+            return
+        try:
+            for name in os.listdir(out_dir):
+                path = os.path.join(out_dir, name)
+                if os.path.isfile(path) and name.endswith(".ts") and os.path.getsize(path) == 0:
                     os.remove(path)
         except OSError:
             pass

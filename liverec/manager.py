@@ -30,7 +30,9 @@ class Manager:
         self._subs: list[Callable[[dict], None]] = []
         self._order: list[str] = []
         self._room_locks: dict[str, asyncio.Lock] = {}
-        self.unattended: bool = True          # 无人值守：启动即恢复监测
+        # 无人值守默认关闭：新装的程序（以及新添加的房间）不会启动就自动开录，
+        # 需要用户逐张卡片点开「自动」才会在下次启动时自动恢复监测。
+        self.unattended: bool = False
         self.load()
 
     # ---------- 持久化 ----------

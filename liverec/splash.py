@@ -48,7 +48,7 @@ _HTML = """<!DOCTYPE html>
   <div class="wrap">
     <div class="logo"><i></i></div>
     <h1>LiveRec 控制台</h1>
-    <div class="sub">DOUYIN LIVE RECORDER</div>
+    <div class="sub">LIVE RECORDER</div>
     <div class="bar"><i id="p"></i></div>
     <div class="tip" id="t">正在启动程序…</div>
   </div>
