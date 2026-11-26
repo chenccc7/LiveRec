@@ -248,4 +248,5 @@ LiveRec\                      ← 整个文件夹搬走就能用
 
 - 想换电脑：**整个 `LiveRec\` 文件夹**复制过去即可（`data\config\config.ini` 里有 Cookie，注意别外传）；
 - `data\` 跟程序目录走：`dist\LiveRec\LiveRec.exe` 读的是 `dist\LiveRec\data\config\config.ini`；
+- **设置里的路径会跟着文件夹走**：保存路径 / 弹幕路径 / ffmpeg 路径只要在程序目录内，`config.ini` 里存的是相对路径（例如 `data\downloads`），整个文件夹搬走后自动指向新位置；老版本留下的绝对路径，启动时会自动改写成相对路径；填在程序目录之外的路径（例如 `E:\rec`）保持绝对路径不变。
 - 只有 exe 没有 `_internal\` 是跑不起来的，所以**别只拷 exe**。

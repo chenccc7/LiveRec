@@ -59,6 +59,11 @@ class Config:
         self._lock = threading.RLock()
         self.cp = _new_parser()
         self.reload()
+        try:
+            # 整个文件夹被搬走后，老的绝对路径会失效：启动时就地改写成相对路径
+            self.relocate_paths()
+        except Exception:  # noqa: BLE001 - 迁移失败不影响启动
+            pass
 
     def reload(self) -> None:
         with self._lock:
@@ -129,8 +134,65 @@ class Config:
     def folder_by_author(self) -> bool:
         return self.get_bool(SEC_REC, "保存文件夹是否以作者区分", True)
 
+    # ---------- 路径：相对 app_root 保存，整个文件夹搬走也不会失效 ----------
+    @staticmethod
+    def _relativize(value: str) -> str:
+        """把 app_root 内的绝对路径存成相对路径（换机器/搬文件夹后依然有效）。"""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            full = os.path.abspath(os.path.expanduser(text))
+        except (OSError, ValueError):
+            return text
+        root = os.path.abspath(paths.app_root())
+        if full == root:
+            return "."
+        if full.startswith(root + os.sep):
+            return os.path.relpath(full, root)
+        return full
+
+    @staticmethod
+    def _locate(value: str) -> str:
+        """把配置里的路径还原成绝对路径；老的绝对路径按 data/ 之后的部分重新定位。"""
+        text = str(value or "").strip().strip('"').strip("'")
+        if not text:
+            return ""
+        try:
+            expanded = os.path.expanduser(text)
+        except (OSError, ValueError):
+            return text
+        if not os.path.isabs(expanded):
+            return os.path.normpath(os.path.join(paths.app_root(), expanded))
+        if os.path.exists(expanded):
+            return expanded
+        marker = os.sep + "data" + os.sep
+        index = expanded.lower().rfind(marker.lower())
+        if index >= 0:
+            tail = expanded[index + len(marker):]
+            # 只在「明显是本程序的 data 子目录」时才重定位，避免误改用户自己的 D:\data\xxx
+            head = tail.split(os.sep, 1)[0].lower()
+            if head in ("downloads", "config", "manifests", "danmaku", "logs", "merge-tmp"):
+                return os.path.normpath(os.path.join(paths.app_root(), "data", tail))
+        return expanded
+
+    def relocate_paths(self) -> None:
+        """启动时把「搬过的程序目录」留下的绝对路径改写成相对路径（幂等、无变更不写文件）。"""
+        changed = False
+        for key in ("直播保存路径(不填则默认)", K_DANMAKU_ROOT, K_FFMPEG):
+            raw = self.raw(SEC_REC, key, "").strip()
+            if not raw:
+                continue
+            # 先按新位置重定位（老机器/旧文件夹的绝对路径），再存成相对路径
+            stored = self._relativize(self._locate(raw))
+            if stored != raw:
+                self.set(SEC_REC, key, stored)
+                changed = True
+        if changed:
+            self.save()
+
     def save_root(self) -> str:
-        custom = self.raw(SEC_REC, "直播保存路径(不填则默认)", "")
+        custom = self._locate(self.raw(SEC_REC, "直播保存路径(不填则默认)", ""))
         if custom:
             try:
                 os.makedirs(custom, exist_ok=True)
@@ -141,7 +203,7 @@ class Config:
 
     def danmaku_root(self) -> str:
         """弹幕明细的根目录；空串表示「跟着视频目录走」（放在录像旁边的 danmaku/ 里）。"""
-        custom = self.raw(SEC_REC, K_DANMAKU_ROOT, "").strip()
+        custom = self._locate(self.raw(SEC_REC, K_DANMAKU_ROOT, ""))
         if not custom:
             return ""
         try:
@@ -152,7 +214,7 @@ class Config:
 
     def ffmpeg_path(self) -> str:
         """设置页里自定义的 ffmpeg.exe；返回真正生效的路径（无效/为空则回落到内置）。"""
-        raw = self.raw(SEC_REC, K_FFMPEG, "").strip().strip('"').strip("'")
+        raw = self._locate(self.raw(SEC_REC, K_FFMPEG, ""))
         return paths.set_ffmpeg_path(raw)
 
     def apply_ffmpeg_path(self) -> str:
@@ -178,7 +240,7 @@ class Config:
             "folderByAuthor": self.folder_by_author(),
             "cookies": {p: self.cookie(p) for p in COOKIE_KEYS},
             "ffmpeg": paths.ffmpeg_exe(),
-            "ffmpegPath": self.raw(SEC_REC, K_FFMPEG, "").strip(),
+            "ffmpegPath": self._locate(self.raw(SEC_REC, K_FFMPEG, "")),
         }
 
     def apply_dict(self, data: dict[str, Any]) -> None:
@@ -187,11 +249,11 @@ class Config:
         if "saveFormat" in data and str(data["saveFormat"]).lower() in FORMATS:
             self.set(SEC_REC, K_FORMAT, str(data["saveFormat"]).lower())
         if "saveRoot" in data:
-            self.set(SEC_REC, "直播保存路径(不填则默认)", str(data["saveRoot"] or ""))
+            self.set(SEC_REC, "直播保存路径(不填则默认)", self._relativize(str(data["saveRoot"] or "")))
         if "danmakuRoot" in data:
-            self.set(SEC_REC, K_DANMAKU_ROOT, str(data["danmakuRoot"] or ""))
+            self.set(SEC_REC, K_DANMAKU_ROOT, self._relativize(str(data["danmakuRoot"] or "")))
         if "ffmpegPath" in data:
-            self.set(SEC_REC, K_FFMPEG, str(data["ffmpegPath"] or ""))
+            self.set(SEC_REC, K_FFMPEG, self._relativize(str(data["ffmpegPath"] or "")))
             self.apply_ffmpeg_path()
         if "splitEnabled" in data:
             self.set(SEC_REC, "分段录制是否开启", "是" if data["splitEnabled"] else "否")
