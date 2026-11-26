@@ -126,6 +126,15 @@ def _close_windows(title_keyword: str) -> int:
         return 0
 
 
+def close_stale_splash() -> int:
+    """关掉上回异常退出留下的「LiveRec 正在启动…」窗口。
+
+    启动画面是转瞬即逝的窗口，任何时刻都不该有另一个进程在用它；
+    留着只会让下次启动看起来像开了两个窗口。
+    """
+    return _close_windows("LiveRec 正在启动")
+
+
 def _screen_size() -> tuple[int, int]:
     if sys.platform != "win32":
         return (1600, 900)

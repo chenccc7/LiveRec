@@ -129,33 +129,62 @@ class Controller:
             self.window.close()
 
 
+def _port_file() -> str:
+    """记录本目录实例上次监听的端口，供「重复双击唤回窗口」用（避免扫端口）。"""
+    try:
+        return os.path.join(paths.data_dir(), "port.txt")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def remember_port(port: int) -> None:
+    path = _port_file()
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(str(int(port)))
+    except OSError:
+        pass
+
+
 def find_running_instance(start: int = 8765, end: int = 8795) -> tuple[str, str] | None:
     """如果同一个程序目录下已经有一个 LiveRec 在跑，返回 (地址, 程序目录)。
 
     注意：只认同「同一个 app_root」的实例。把整个文件夹复制到别的盘再启动时，
     那是另一份独立程序（有自己的 data 和设置），不能去唤回旧实例的窗口，
     否则界面/日志里显示的还是旧目录的路径。
+
+    性能：只看上次记录在 ``data/port.txt`` 里的端口（一次 HTTP 探测），
+    不再扫 30 个端口——本机没开 LiveRec 时逐端口探测会白等一两秒甚至十几秒。
     """
     import json
     import urllib.request
 
     local_root = os.path.normcase(os.path.abspath(paths.app_root()))
-    for port in range(start, end):
-        url = f"http://127.0.0.1:{port}"
-        try:
-            with urllib.request.urlopen(f"{url}/api/state", timeout=0.4) as resp:
-                data = json.loads(resp.read().decode("utf-8", "ignore"))
-        except Exception:
-            continue
-        if not (isinstance(data, dict) and data.get("version")):
-            continue
-        remote_root = str(data.get("appRoot") or "")
-        if not remote_root:
-            # 老版本没有 appRoot 字段：退回「唤回窗口」的老行为
-            return url, ""
-        if os.path.normcase(os.path.abspath(remote_root)) == local_root:
-            return url, remote_root
-        # 别的目录里的 LiveRec，互不干扰，继续找自己的端口
+    try:
+        with open(_port_file(), "r", encoding="utf-8") as fh:
+            saved = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+    if not (start <= saved < end):
+        return None
+    url = f"http://127.0.0.1:{saved}"
+    try:
+        with urllib.request.urlopen(f"{url}/api/state", timeout=0.5) as resp:
+            data = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception:
+        return None
+    if not (isinstance(data, dict) and data.get("version")):
+        return None
+    remote_root = str(data.get("appRoot") or "")
+    if not remote_root:
+        # 老版本没有 appRoot 字段：退回「唤回窗口」的老行为
+        return url, ""
+    if os.path.normcase(os.path.abspath(remote_root)) == local_root:
+        return url, remote_root
+    # 那个端口是别的目录里的 LiveRec，互不干扰
     return None
 
 
@@ -224,6 +253,12 @@ def _enable_faulthandler() -> None:
 
 
 def main() -> int:
+    _boot = time.perf_counter()
+    _marks: dict[str, float] = {}
+
+    def _mark(name: str) -> None:
+        _marks[name] = time.perf_counter() - _boot
+
     _ensure_streams()
     _prepare_frozen_runtime()
     _enable_faulthandler()
@@ -236,11 +271,13 @@ def main() -> int:
     args = parser.parse_args()
 
     paths.seed_config()
+    _mark("init")
 
     # 同一个程序目录已经有一个实例在录：把窗口唤到前台就好，不要再起第二个录制进程。
     # 别的目录里复制出来的 LiveRec 是另一份程序（有自己的 data/设置），照常单独启动。
     if not args.headless and not args.no_window:
         existing = find_running_instance()
+        _mark("instance")
         if existing:
             url, _root = existing
             log("INFO", f"检测到同一目录的 LiveRec 已在运行（{url}），直接唤回窗口")
@@ -250,9 +287,19 @@ def main() -> int:
             return 0
 
     from liverec import server as srv  # 延迟导入，确保配置已就绪
+    _mark("server_import")
 
     if _RUNTIME_NOTE:  # 此刻日志文件才接上，补记本次的解压目录
         log(*_RUNTIME_NOTE)
+
+    # ---- 先把后端跑起来：uvicorn 在后台线程里启动，和下面开窗口同时进行 ----
+    port = args.port or pick_port()
+    config = uvicorn.Config(srv.app, host="127.0.0.1", port=port,
+                            log_level="warning", access_log=False)
+    uvicorn_server = uvicorn.Server(config)
+    thread = threading.Thread(target=uvicorn_server.run, daemon=True, name="uvicorn")
+    thread.start()
+    _mark("server_start")
 
     # ---- 启动画面：先开一个带进度条的窗口，服务就绪后自动跳到控制台 ----
     splash = None
@@ -261,7 +308,9 @@ def main() -> int:
     if not (args.headless or args.no_window):
         try:
             from liverec.splash import Splash
+            from liverec import desktop as _desktop
 
+            _desktop.close_stale_splash()
             splash = Splash()
             splash_url = splash.start()
             if splash_url:
@@ -270,20 +319,11 @@ def main() -> int:
                 early_window = AppWindow(splash_url, "LiveRec 控制台")
                 early_window.show()
                 window_opened = True
-            splash.set(30, "正在启动服务…")
+            splash.set(55, "正在加载配置与直播间…")
         except Exception as exc:  # noqa: BLE001 - 启动画面失败不能影响主流程
             log("WARN", f"启动画面不可用：{exc}")
             splash = None
-
-    port = args.port or pick_port()
-    config = uvicorn.Config(srv.app, host="127.0.0.1", port=port,
-                            log_level="warning", access_log=False)
-    uvicorn_server = uvicorn.Server(config)
-    thread = threading.Thread(target=uvicorn_server.run, daemon=True, name="uvicorn")
-    thread.start()
-
-    if splash is not None:
-        splash.set(55, "正在加载配置与直播间…")
+        _mark("window")
 
     if not wait_port(port):
         print("服务启动失败，请检查端口占用或日志。", file=sys.stderr)
@@ -292,8 +332,14 @@ def main() -> int:
         return 1
 
     url = f"http://127.0.0.1:{port}"
+    remember_port(port)
     print(f"LiveRec 控制台已启动：{url}")
     print(f"数据目录：{paths.data_dir()}")
+    _mark("server_ready")
+    try:
+        log("INFO", "启动耗时：" + " · ".join(f"{k} {v:.2f}s" for k, v in _marks.items()))
+    except Exception:  # noqa: BLE001
+        pass
 
     if args.headless or args.no_window:
         log("INFO", f"服务已就绪（无窗口模式）{url}")
