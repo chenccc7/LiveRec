@@ -68,7 +68,8 @@ def probe_duration(path: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
-def _normalize(part: str, out: str, container: str = "mpegts") -> tuple[bool, str]:
+def _normalize(part: str, out: str, container: str = "mpegts",
+               skip: float = 0.0) -> tuple[bool, str]:
     """把一段录好的文件重新封装成时间轴从 0 开始的容器（默认 TS）。
 
     分段可能是被 CDN 掐断的残缺文件，所以先常规转一次，失败再放宽错误容忍
@@ -93,20 +94,32 @@ def _normalize(part: str, out: str, container: str = "mpegts") -> tuple[bool, st
     return False, last
 
 
-def _write_list(items: list[str], list_path: str) -> None:
+def _write_list(items: list[str], list_path: str,
+                inpoints: list[float] | None = None) -> None:
+    """写 concat 列表；inpoints[i] > 0 时跳过该段开头的 inpoint 秒。
+
+    续段时新的一条流通常从「上一个分片」开始播，开头会和上一段录到的内容重叠，
+    用 inpoint 精确跳过这段重复，拼出来才是接着往下走而不是重播几秒。
+    """
     with open(list_path, "w", encoding="utf-8", newline="\n") as handle:
-        for item in items:
+        for index, item in enumerate(items):
             handle.write("file '" + item.replace("'", "'\\''") + "'\n")
+            skip = 0.0
+            if inpoints and index < len(inpoints):
+                skip = float(inpoints[index] or 0.0)
+            if skip > 0.01:
+                handle.write(f"inpoint {skip:.3f}\n")
 
 
-def _concat(items: list[str], out: str, container: str) -> tuple[bool, str]:
+def _concat(items: list[str], out: str, container: str,
+            inpoints: list[float] | None = None) -> tuple[bool, str]:
     """直接用 concat 分离器把若干文件拼到 out（流拷贝，不重编码）。"""
     tmp_root = os.path.dirname(os.path.abspath(items[0])) if items else tempfile.gettempdir()
     os.makedirs(tmp_root, exist_ok=True)
     tmp_dir = tempfile.mkdtemp(prefix="c-", dir=tmp_root)
     try:
         list_path = os.path.join(tmp_dir, "list.txt")
-        _write_list(items, list_path)
+        _write_list(items, list_path, inpoints)
         attempts = [
             ["-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy"],
             ["-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt",
@@ -129,14 +142,21 @@ def _concat(items: list[str], out: str, container: str) -> tuple[bool, str]:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
+def merge_parts(parts: list[str], out: str,
+                inpoints: list[float] | None = None) -> tuple[bool, str]:
     """把一场直播的多个分段拼成一个文件，返回 (是否成功, 说明)。
 
     虎牙的分段都是同一个源（FLV）切出来的，先试「直接 concat 原始分段」——
     这条路对「末尾被掐断」的残缺分段最宽容，能救回的信息最多；
     不行再退回「逐段重封装成 TS 再拼」的老路。
     """
+    raw = list(parts)
     parts = [p for p in parts if os.path.isfile(p) and os.path.getsize(p) > 0]
+    if raw and parts and len(parts) == len(raw) and inpoints:
+        pass  # 顺序一致，inpoints 可以直接用
+    elif parts != raw:
+        inpoints = [inpoints[raw.index(p)] if inpoints and p in raw else 0.0
+                    for p in parts]
     if not parts:
         return False, "没有可用分段"
     if len(parts) == 1:
@@ -148,7 +168,7 @@ def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
     expected = sum(probe_duration(p) for p in parts)
     flv_parts = [p for p in parts if p.lower().endswith(".flv")]
     if len(flv_parts) == len(parts):
-        ok, detail = _concat(parts, out, "flv")
+        ok, detail = _concat(parts, out, "flv", inpoints)
         got = probe_duration(out) if ok else 0.0
         # 拼出来的时长至少要覆盖分段合计的六成，否则当作这条路没走通
         if ok and (not expected or got >= expected * 0.6):
@@ -167,7 +187,9 @@ def merge_parts(parts: list[str], out: str) -> tuple[bool, str]:
         total = 0.0
         for index, part in enumerate(parts):
             # 优先 TS；TS 转不出来的残缺 FLV 再试一次 FLV 输出（同容器成功率高得多）
-            ok, detail = _normalize(part, os.path.join(tmp_dir, f"p{index:03d}.ts"))
+            skip = float(inpoints[index]) if inpoints and index < len(inpoints) else 0.0
+            ok, detail = _normalize(part, os.path.join(tmp_dir, f"p{index:03d}.ts"),
+                                    skip=skip)
             target = os.path.join(tmp_dir, f"p{index:03d}.ts")
             if not ok and part.lower().endswith(".flv"):
                 target = os.path.join(tmp_dir, f"p{index:03d}_f.flv")
@@ -304,7 +326,8 @@ def convert_session(path: str, target_fmt: str = "") -> None:
 
 
 def merge_session(parts: list[str], out: str, keep_parts: bool = False,
-                  target_fmt: str = "") -> tuple[bool, str]:
+                  target_fmt: str = "",
+                  inpoints: list[float] | None = None) -> tuple[bool, str]:
     """拼接 + 记日志 + 视情况清理分段，可选再转成目标容器。
 
     返回 (是否成功, 说明)；既能给后台线程用（忽略返回值），
@@ -314,7 +337,7 @@ def merge_session(parts: list[str], out: str, keep_parts: bool = False,
     if len(parts) < 2:
         return True, "只有一个分段，无需拼接"
     log("INFO", f"{label} 开始拼接 {len(parts)} 个分段…")
-    ok, detail = merge_parts(parts, out)
+    ok, detail = merge_parts(parts, out, inpoints)
     if not ok:
         log("WARN", f"{label} 拼接失败（分段已保留）：{detail}")
         return False, detail

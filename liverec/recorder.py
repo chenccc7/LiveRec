@@ -101,6 +101,8 @@ class RecordTask:
         self._no_data = False
         self._no_data_streak = 0
         self._chunk_index = 0
+        self._part_meta: list[dict[str, Any]] = []
+        self._first_byte_at = 0.0
         self._parts: list[str] = []
         self.error = ""
         self.started_at = 0.0
@@ -611,6 +613,7 @@ class RecordTask:
             self._last_error_lines = []
             attempt_started = time.time()
             self._last_growth = time.time()
+            self._first_byte_at = 0.0
             last_beat = time.time()
             pump = asyncio.create_task(self._pump())
             while True:
@@ -808,6 +811,11 @@ class RecordTask:
         if path in self._parts:
             return
         self._parts.append(path)
+        self._part_meta.append({
+            "path": path,
+            "start": self._first_byte_at or time.time(),
+            "end": time.time(),
+        })
         log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
                     f"（{_fmt_size(size)}）：{os.path.basename(path)}")
 
@@ -829,7 +837,11 @@ class RecordTask:
             log("INFO", f"{self.anchor or self.url} 录制中，分段先留着，等这一场结束再合并")
             return
         parts = [p for p in self._parts if os.path.isfile(p)]
+        metas = [m for m in getattr(self, "_part_meta", [])
+                 if m.get("path") in set(parts)]
         self._parts = []
+        self._part_meta = []
+        inpoints = self._overlaps(parts, metas)
         if self.platform != "huya":
             return
         target_fmt = ""
@@ -861,7 +873,7 @@ class RecordTask:
         if blocking:
             loop = asyncio.get_running_loop()
             ok, message = await loop.run_in_executor(
-                None, concat.merge_session, parts, out, False, target_fmt)
+                None, concat.merge_session, parts, out, False, target_fmt, inpoints)
             log("INFO" if ok else "WARN",
                 f"{self.anchor or self.url} 已合并 {len(parts)} 个分段 → "
                 f"{os.path.basename(out)}（{message or 'ok'}）")
@@ -870,10 +882,43 @@ class RecordTask:
         else:
             threading.Thread(
                 target=concat.merge_session,
-                args=(parts, out, False, target_fmt),
+                args=(parts, out, False, target_fmt, inpoints),
                 daemon=True,
                 name="concat",
             ).start()
+
+    @staticmethod
+    def _overlaps(parts: list[str], metas: list[dict]) -> list[float]:
+        """算出每一段开头有多少秒是上一段已经录过的（续段重播）。
+
+        第 i 段真实开始写数据的时刻，和第 i-1 段收尾时刻重叠的那段时间，
+        两段录的是同一段直播内容 —— 拼接时把第 i 段开头这段跳过即可，
+        否则拼出来就是「播几秒、退回几秒重播」。
+        """
+        points: list[float] = []
+        for index, part in enumerate(parts):
+            skip = 0.0
+            if index > 0 and len(metas) == len(parts):
+                prev_end = float(metas[index - 1].get("end") or 0.0)
+                cur_start = float(metas[index].get("start") or 0.0)
+                if prev_end and cur_start and cur_start < prev_end:
+                    skip = prev_end - cur_start
+                    # 兜底：重叠不可能超过这一段自己的长度
+                    try:
+                        dur = concat.probe_duration(part)
+                    except Exception:  # noqa: BLE001
+                        dur = 0.0
+                    if dur > 0:
+                        skip = min(skip, dur * 0.9)
+                    else:
+                        skip = min(skip, 120.0)
+                    if skip > 0.3:
+                        log("INFO", f"{os.path.basename(part)} 与上一段重叠 "
+                                    f"{skip:.1f} 秒，拼接时自动跳过")
+                    else:
+                        skip = 0.0
+            points.append(round(skip, 3))
+        return points
 
     async def _split_if_needed(self, merged: str, target_fmt: str, loop) -> None:
         """用户开了「分段录制」时，把合并后的整场文件再按分段时间切开。
@@ -942,7 +987,9 @@ class RecordTask:
             # HLS 播放列表本身会被反复重取，reconnect_* 会让 http 协议层把「列表读完」
             # 当成 EOF 反复重连（日志里刷 "Will reconnect at N ... End of file"），
             # 所以 HLS 输入不加这几个参数，重连交给 hls demuxer。
-            cmd += ["-http_persistent", "0"]
+            # 默认 live_start_index=-3 会从「倒数第 3 个分片」起播，续段时会把
+            # 已经录过的内容重播一遍；只从最新分片起播，重叠降到最少。
+            cmd += ["-http_persistent", "0", "-live_start_index", "-1"]
         else:
             cmd += [
                 "-reconnect_delay_max", "60", "-reconnect", "1", "-reconnect_streamed", "1",
@@ -1034,6 +1081,8 @@ class RecordTask:
             if self._base_bytes + new_size != self.size:
                 self._last_growth = time.time()
             self.size = self._base_bytes + new_size
+            if not self._first_byte_at and new_size > 0:
+                self._first_byte_at = time.time()
             self.size_text = _fmt_size(self.size)
         elif key == "bitrate":
             if val and val.upper() != "N/A":
@@ -1075,6 +1124,8 @@ class RecordTask:
             if self._base_bytes + total > self.size:
                 self._last_growth = time.time()
             self.size = self._base_bytes + total
+            if not self._first_byte_at:
+                self._first_byte_at = time.time()
             self.size_text = _fmt_size(self.size)
         self.segments = count
         if latest:
