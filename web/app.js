@@ -57,6 +57,7 @@ const S = {
   settings: {},
   cookies: {},
   logs: [],
+  logFilter: 'ALL',
   logSeq: 0,
   logPath: '',
   ffmpeg: '',
@@ -343,6 +344,8 @@ function logRow(entry) {
   const time = entry.time || new Date(Number(entry.ts || 0) * 1000).toTimeString().slice(0, 8);
   const div = document.createElement('div');
   div.className = 'lrow';
+  div.dataset.lv = label;
+  if (S.logFilter !== 'ALL' && label !== S.logFilter) div.classList.add('hide');
   div.innerHTML = `<span class="ts">${time}</span>` +
     `<span class="lv ${lvClass(lv)}">${label}</span>` +
     `<span class="msg">${escapeHtml(entry.message || '')}</span>`;
@@ -357,18 +360,40 @@ function applyLogs(list) {
       '<span class="msg">等待事件…</span></div>';
     return;
   }
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   list.forEach(entry => {
     if (entry.id && entry.id <= S.logSeq) return;
     if (entry.id) S.logSeq = Math.max(S.logSeq, entry.id);
     box.appendChild(logRow(entry));
   });
-  while (box.children.length > 200) box.removeChild(box.firstChild);
-  box.scrollTop = box.scrollHeight;
+  while (box.children.length > 300) box.removeChild(box.firstChild);
+  // 用户往上翻看历史时不要强行拉回底部，只有本来就在底部才跟着滚
+  if (stick) box.scrollTop = box.scrollHeight;
 }
 
 function pushLocalLog(level, message) {
   applyLogs([{ id: undefined, level, message, time: new Date().toTimeString().slice(0, 8) }]);
 }
+
+function bindLogFilters() {
+  const wrap = document.getElementById('logfilters');
+  if (!wrap) return;
+  wrap.addEventListener('click', ev => {
+    const chip = ev.target.closest('.chip');
+    if (!chip) return;
+    S.logFilter = chip.dataset.lv || 'ALL';
+    wrap.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === chip));
+    const box = document.getElementById('logs');
+    if (!box) return;
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.querySelectorAll('.lrow').forEach(row => {
+      const on = S.logFilter === 'ALL' || row.dataset.lv === S.logFilter;
+      row.classList.toggle('hide', !on);
+    });
+    if (stick) box.scrollTop = box.scrollHeight;
+  });
+}
+bindLogFilters();
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => (

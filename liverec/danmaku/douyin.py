@@ -259,6 +259,7 @@ class DouyinDanmaku:
                                       ping_interval=None, open_timeout=15) as ws:
             log("INFO", f"[弹幕/抖音] 连接 {url.split('?')[0]}（房间 {self.room_id}）")
             last_ping = 0.0
+            last_frame = time.time()
             while True:
                 if time.time() - last_ping >= 5:
                     last_ping = time.time()
@@ -270,7 +271,12 @@ class DouyinDanmaku:
                     if self._pending_ack:
                         ack, self._pending_ack = self._pending_ack, b""
                         await ws.send(ack)
+                    # 半死连接：TCP 还没报错，但服务端已经不再推消息了。靠这个看门狗
+                    # 主动断开重连，不然要等内核超时，一丢就是几十秒的弹幕。
+                    if time.time() - last_frame > 25:
+                        raise RuntimeError("25 秒没有收到任何推流帧，主动重连")
                     continue
+                last_frame = time.time()
                 if isinstance(raw, str):
                     continue
                 frame = pb.PushFrame()
@@ -287,14 +293,18 @@ class DouyinDanmaku:
         await self._prepare()
         if not self.ttwid:
             log("WARN", "[弹幕/抖音] 未拿到 ttwid，可能会被服务端拒绝")
-        delay = 3.0
+        delay = 0.8
         while True:
+            started = time.time()
             try:
                 await self._consume(emit)
-                delay = 3.0
+                delay = 0.8
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 长连任何异常都重试
                 log("WARN", f"[弹幕/抖音] 连接中断：{type(exc).__name__}: {exc}")
+                if time.time() - started > 120:
+                    # 连了很久才被掐：说明是服务端主动断，立刻重连，少丢弹幕
+                    delay = 0.8
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 30.0)
+                delay = min(max(delay * 1.8, 0.8), 8.0)

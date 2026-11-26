@@ -318,7 +318,24 @@
   .logs { margin-top: 22px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(0,0,0,.24); overflow: hidden; }
   .logs-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); font-size: 12px; color: var(--muted); }
   .logs-head .spacer { flex: 1; }
-  .logs-body { padding: 9px 14px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.85; overflow-x: hidden; }
+  .logs-body {
+    padding: 9px 14px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.85;
+    overflow-x: hidden; overflow-y: auto; max-height: 300px; scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.14) transparent;
+  }
+  .logs-body::-webkit-scrollbar { width: 8px; }
+  .logs-body::-webkit-scrollbar-track { background: transparent; }
+  .logs-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 999px; }
+  .logs-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.22); }
+  .lrow.hide { display: none; }
+  .logfilters { display: flex; align-items: center; gap: 5px; }
+  .logfilters .chip {
+    font-family: inherit; font-size: 10.5px; line-height: 1; padding: 4px 9px; cursor: pointer;
+    color: var(--muted); background: transparent; border: 1px solid var(--line-soft);
+    border-radius: 999px; transition: color .15s, border-color .15s, background .15s;
+  }
+  .logfilters .chip:hover { color: #cbd5e3; border-color: rgba(255,255,255,.2); }
+  .logfilters .chip.on { color: #fff; border-color: rgba(255,77,109,.55); background: rgba(255,77,109,.16); }
   .lrow { display: flex; gap: 10px; min-width: 0; }
   .lrow .ts { color: #495366; flex: none; }
   .lrow .lv { flex: none; width: 56px; font-weight: 600; }
@@ -393,6 +410,13 @@
       <span style="color:#3d4557">·</span>
       <span style="color:#4a5468">logs/app_2026-11-24.log</span>
       <div class="spacer"></div>
+      <div class="logfilters" id="logfilters">
+        <button class="chip on" data-lv="ALL">全部</button>
+        <button class="chip" data-lv="INFO">INFO</button>
+        <button class="chip" data-lv="SUCCESS">成功</button>
+        <button class="chip" data-lv="WARN">警告</button>
+        <button class="chip" data-lv="ERROR">错误</button>
+      </div>
       <span style="font-size:11px;color:#4a5468">实时跟随</span>
       <span style="width:6px;height:6px;border-radius:50%;background:#35d07f;box-shadow:0 0 6px #35d07f"></span>
     </div>

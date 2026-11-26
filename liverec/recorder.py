@@ -459,6 +459,7 @@ class RecordTask:
                 self.error = ""
                 self.note = f"连续 2 次 8 秒没有写入数据，已回到等待开播（{interval} 秒后重新检测）"
                 self.next_check_at = time.time() + interval
+                await self._stop_danmaku()
                 self.push(force=True)
                 log("INFO", f"{self.anchor or self.url} 连续 2 次没有写入数据，"
                             f"已回到等待开播，{interval}s 后重新检测")
@@ -473,6 +474,7 @@ class RecordTask:
                 self.status = "waiting"
                 self.error = ""
                 self.next_check_at = time.time() + interval
+                await self._stop_danmaku()
                 self.push(force=True)
                 log("INFO", f"{self.anchor or self.url} 回到等待开播，{interval}s 后重新检测")
                 await self._wait(interval)
@@ -841,6 +843,10 @@ class RecordTask:
             log("INFO", f"{anchor} 这一段结束（{_fmt_size(self.size)}，分片继续攒，攒够时长再合并）")
         else:
             log("INFO", f"{anchor} 本次录制结束（{_fmt_size(self.size)}，{self.segments or 1} 个文件）")
+        if self.platform == "huya" and self.status != "recording":
+            # 虎牙跨段时弹幕要连着，但这一段真的结束了（回等待 / 报错）就必须停，
+            # 否则没人录制时它还会每 5 分钟重连一次，日志里全是「连接中断 / 连接」。
+            await self._stop_danmaku()
         self.push(force=True)
 
     async def _flush_parts_before_wait(self) -> None:
