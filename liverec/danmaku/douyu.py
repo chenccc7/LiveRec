@@ -19,6 +19,7 @@ from ..logbook import log
 
 HOST = "danmuproxy.douyu.com"
 PORTS = (8601, 8602, 8506, 8504, 8502)
+_PREFERRED: dict[str, int] = {}
 MSG_LOGIN = 689
 HEARTBEAT = 30.0
 
@@ -74,7 +75,11 @@ class DouyuDanmaku:
 
     async def run(self, emit: Callable[[dict], None]) -> None:
         last_error: Exception | None = None
-        for port in PORTS:
+        # 上次连通过的那个端口优先再试：8502/8504/8506 有时能连上但不下发任何消息，
+        # 每次都从 8601 重跑会来回换端口、日志里看起来像「反复断联」。
+        preferred = _PREFERRED.get(self.rid)
+        ports = ([preferred] + [p for p in PORTS if p != preferred]) if preferred else list(PORTS)
+        for port in ports:
             try:
                 await self._connect(port, emit)
                 return
@@ -87,6 +92,7 @@ class DouyuDanmaku:
         raise RuntimeError(f"斗鱼弹幕连接失败：{last_error}")
 
     async def _connect(self, port: int, emit: Callable[[dict], None]) -> None:
+        self._port = port
         log("INFO", f"[弹幕/斗鱼] 连接 tcp://{HOST}:{port}（房间 {self.rid}）")
         reader, writer = await asyncio.wait_for(asyncio.open_connection(HOST, port), timeout=15)
         try:
@@ -95,13 +101,15 @@ class DouyuDanmaku:
             writer.write(_pack(f"type@=joingroup/rid@={self.rid}/gid@=-9999/"))
             await writer.drain()
 
+            # 心跳必须独立定时发：房间里消息多时 reader.read 一直不超时，
+            # 原来的「读超时才发心跳」等于永远不发，服务端 120 秒就掐线
+            # （日志里每 2 分钟一条「连接中断：斗鱼服务端关闭了连接」就是这个）。
+            hb = asyncio.create_task(self._heartbeat(writer))
             buf = b""
             while True:
                 try:
-                    chunk = await asyncio.wait_for(reader.read(8192), timeout=HEARTBEAT)
+                    chunk = await asyncio.wait_for(reader.read(8192), timeout=90)
                 except asyncio.TimeoutError:
-                    writer.write(_pack(f"type@=keeplive/tick@={int(time.time())}/"))
-                    await writer.drain()
                     continue
                 if not chunk:
                     raise ConnectionError("斗鱼服务端关闭了连接")
@@ -111,11 +119,23 @@ class DouyuDanmaku:
                 if messages:
                     await writer.drain()
         finally:
+            hb.cancel()
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
+
+    async def _heartbeat(self, writer) -> None:
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT)
+                writer.write(_pack(f"type@=keeplive/tick@={int(time.time() * 1000)}/"))
+                await writer.drain()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 连接断了由读循环负责抛错
+            pass
 
     def _handle(self, payload: bytes, writer, emit: Callable[[dict], None]) -> None:
         text = payload.decode("utf-8", "ignore").strip("\0").strip()
@@ -124,6 +144,7 @@ class DouyuDanmaku:
         f = _fields(text)
         kind = f.get("type", "")
         if kind == "loginres":
+            _PREFERRED[self.rid] = getattr(self, "_port", 0) or _PREFERRED.get(self.rid, 0)
             log("INFO", f"[弹幕/斗鱼] 已登录弹幕服务器（房间 {self.rid}）")
         elif kind == "pingreq":
             # 服务端探活，官方网页端回一个 mrkl

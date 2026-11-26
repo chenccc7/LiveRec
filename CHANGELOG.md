@@ -1,4 +1,9 @@
 ## 未发布
+- **修四个录制问题**（用户反馈）：
+  1. **虎牙「录制时长」每换地址就归零**：`liverec/recorder.py::_record_once()` 里 `self.started_at = time.time()` 原来每次续段都重置，卡片上的计时器（前端按 `startedAt` 算）就回到 0。改成「只有本场第一次开录时才设」，续段保留原 `started_at`、`_elapsed_base` 接着累加。
+  2. **斗鱼弹幕每 2 分钟断一次**：`liverec/danmaku/douyu.py` 的心跳原来只在 `reader.read()` 超时才发（30 秒），房间里消息一多读就不超时 → 心跳永远不发 → 服务端 120 秒掐线。改成独立 `_heartbeat()` 协程每 30 秒必发 `keeplive`（毫秒 tick），读循环超时放到 90 秒；另外记住上次登录成功的端口优先重连（8502/8504/8506 能连但不下发消息，来回换端口看着像反复断联）。实测同一房间 170 秒 0 次断联、307 条弹幕（改动前每 120 秒必断）。
+  3. **点「停止」时卡片卡住**：`RecordTask.stop()` 原来同步 `await _finish_session(blocking=True)`，几 GB 的分片要合并一两分钟，HTTP 请求就一直挂着。改成状态立刻切成「已停止」并推送，合并丢到后台任务 `_finalize_queued()`，卡片 note 显示「已停止，正在后台合并分片」，合并完再刷成「分片合并完成」。顺带把 `_kill_proc()` 等 ffmpeg 退出的超时从 6 秒降到 2 秒（HLS 的 ffmpeg 常要好几秒才退），实测停止请求 6.2 秒。
+  4. **分段接缝丢内容**：HLS 输入从 `-live_start_index -1` 改成 `-2`，续段时从「倒数第 2 个分片」起播，和上一段结尾**重叠约 4 秒**——宁可重复几秒也不要在接缝处丢内容（用户建议的重叠方案）。
 - **启动加速：14.5 秒 → 1.3～1.7 秒**（用户反馈「现在太慢了，之前不是 1 到 2 秒吗」）：实测发现带窗口启动 14.5 秒、`--no-window` 只 1.2 秒，慢在 `run.py::find_running_instance()` 对 8765–8794 逐端口 `urlopen(timeout=0.4)`，本机没实例时要白等约 12 秒。改法：①单实例只查 `<data>/port.txt` 里记录的端口（服务就绪时 `remember_port()` 写入），一次 HTTP 探测（0.5 秒超时）即可；②uvicorn 启动提到开会启动窗口之前，后端与 Edge 窗口冷启动并行；③启动时关掉上次异常退出残留的「LiveRec 正在启动…」窗口（`liverec/desktop.py::close_stale_splash()`），不会再出现两个窗口；④日志加一行「启动耗时：init … · instance … · server_import … · server_start … · window … · server_ready …」方便以后排查。单实例判定同时改成「同一程序目录才算」，`E:\LiveRec` 与 `C:\...\dist\LiveRec` 可以各跑各的。
 - **设置里的路径跟着文件夹走**：config.ini 里的保存路径 / 弹幕路径 / ffmpeg 路径，只要在程序目录内就存成相对路径（如 data\downloads），整个文件夹搬走后自动指向新位置；老版本留下的绝对路径在启动时自动改写成相对路径；程序目录之外的路径（如 E:\rec）保持绝对路径不变。
 # 更新日志

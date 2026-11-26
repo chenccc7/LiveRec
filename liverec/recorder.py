@@ -118,6 +118,7 @@ class RecordTask:
         self._huya_stall_streak = 0
         # 分片模式（虎牙 + 开了分段录制）：分片先落临时目录，攒够分段时长再合并
         self._shard_mode = False
+        self._finalize_task = None
         self._session_prefix = ""
         self._tmp_dir = ""
         self._part_seq = 0
@@ -233,6 +234,7 @@ class RecordTask:
         self._elapsed_base = 0.0
         self._huya_stall_streak = 0
         self._shard_mode = False
+        self._finalize_task = None
         self._session_prefix = ""
         self._tmp_dir = ""
         self._part_seq = 0
@@ -264,23 +266,36 @@ class RecordTask:
         self._loop_task = None
         self.status = status
         self.next_check_at = 0.0
-        # 停止按钮/删卡片时也要把这次直播的分段拼起来，否则用户只拿到一堆零散文件。
-        # 这里是同步等待合并完成：用户点完「停止」就应该在目录里看到完整文件，
-        # 而不是过一会儿才出现（删卡片时可能连进程都已经被关掉了）。
         self._refresh_disk()
         if not self._shard_mode:
             # 分片模式下每片已经是成品，不进「待拼接」清单
             self._remember_part()
+        # 收尾合并可能要几十秒到一两分钟（几 GB 的分片），不能把「停止」按钮卡住：
+        # 状态先切过去、卡片立刻能点，合并放到后台任务里做，合并完再更新一次卡片。
+        pending = bool(self._parts) or (self._shard_mode and self._tmp_dir)
+        if pending:
+            self.note = "已停止，正在后台合并分片（不用担心，合并完就落盘）"
+            self.push(force=True)
+            self._finalize_task = asyncio.create_task(self._finalize_queued())
+        else:
+            self.push(force=True)
+        if was_recording:
+            # 停录默认是「静默」的，出问题时看不出录音是谁停的；记一条便于排查。
+            log("INFO", f"{self.anchor or self.url} 录制任务已停止（{status}），本段 {self.size_text}")
+
+    async def _finalize_queued(self) -> None:
+        """后台把这次直播的分段拼起来（不阻塞「停止」按钮）。"""
         try:
             await self._finish_session(blocking=True)
+            self.note = "已停止，分片合并完成"
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             # 拼接/转封装是收尾动作，失败了也不能让「停止录制」整体失败：
             # 分段文件都还在磁盘上，用户仍能拿到内容，日志里写清原因即可。
             log("WARN", f"{self.anchor or self.url} 收尾合并失败（分段已保留）：{type(exc).__name__}: {exc}")
+            self.note = "已停止（合并失败，分段文件已保留）"
         self.push(force=True)
-        if was_recording:
-            # 停录默认是「静默」的，出问题时看不出录音是谁停的；记一条便于排查。
-            log("INFO", f"{self.anchor or self.url} 录制任务已停止（{status}），本段 {self.size_text}")
 
     async def _kill_proc(self) -> None:
         proc = self._proc
@@ -290,7 +305,9 @@ class RecordTask:
         try:
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=6)
+                # 只等 2 秒：HLS 的 ffmpeg 常常要好几秒才退出，
+                # 让「停止」按钮等 6 秒太久了，2 秒没退就直接 kill。
+                await asyncio.wait_for(proc.wait(), timeout=2)
             except asyncio.TimeoutError:
                 proc.kill()
         except ProcessLookupError:
@@ -622,7 +639,10 @@ class RecordTask:
 
         out_pattern = make_pattern(0)
 
-        self.started_at = time.time()
+        # 续段（换地址/换签名）不是新的一场：started_at 只有首次开录时才设，
+        # 否则卡片上的「录制时长」每换一次地址就归零。
+        if not self.started_at:
+            self.started_at = time.time()
         self._live_since = time.time()
         self.elapsed = getattr(self, "_elapsed_base", 0.0)
         self.size = self._base_bytes
@@ -1387,9 +1407,10 @@ class RecordTask:
             # HLS 播放列表本身会被反复重取，reconnect_* 会让 http 协议层把「列表读完」
             # 当成 EOF 反复重连（日志里刷 "Will reconnect at N ... End of file"），
             # 所以 HLS 输入不加这几个参数，重连交给 hls demuxer。
-            # 默认 live_start_index=-3 会从「倒数第 3 个分片」起播，续段时会把
-            # 已经录过的内容重播一遍；只从最新分片起播，重叠降到最少。
-            cmd += ["-http_persistent", "0", "-live_start_index", "-1"]
+            # 从「倒数第 2 个分片」起播：比最新分片早约 4 秒，续段/重连时
+            # 这一段会和上一段结尾重叠，宁可重复几秒也不要在接缝处丢内容
+            # （用户要求「上半段结尾和下半段开头重叠一点」）。
+            cmd += ["-http_persistent", "0", "-live_start_index", "-2"]
         else:
             cmd += [
                 "-reconnect_delay_max", "60", "-reconnect", "1", "-reconnect_streamed", "1",
