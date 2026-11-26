@@ -87,6 +87,14 @@ function fmtMeter(sec) {
   return h > 0 ? `${h}:${pad2(m)}:${pad2(ss)}` : `${pad2(m)}:${pad2(ss)}`;
 }
 
+function tsMs(v) {
+  if (!v) return 0;
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return n > 1e12 ? n : n * 1000;
+  const d = Date.parse(String(v));
+  return Number.isFinite(d) ? d : 0;
+}
+
 function fmtClock(ts) {
   const n = Number(ts) || 0;
   if (!n) return '—';
@@ -391,6 +399,9 @@ function roomView(r) {
     status: r.status === 'starting' ? 'waiting' : (r.status || 'idle'),
     elapsedText: fmtDur(elapsed),
     startText: fmtClock(r.startedAt),
+    // 卡片上的「录制时长」按开始录制的时间戳算，和文件时长/体积无关
+    timerText: r.startedAt ? fmtDur(Math.max(0, Math.floor(
+      (Date.now() - tsMs(r.startedAt)) / 1000))) : '—',
     sizeText: r.sizeText || fmtBytes(r.size || 0),
     bitrateText: r.bitrate || '—',
     resText: r.resolution || '—',
@@ -485,7 +496,7 @@ function renderCard(r0) {
   } else {
     body = `
       <div class="stats">
-        <div class="stat"><div class="k">已录时长</div><div class="v" data-f="elapsed">${r.elapsedText}</div></div>
+        <div class="stat"><div class="k">录制时长</div><div class="v" data-f="timer">${r.timerText}</div></div>
         <div class="stat"><div class="k">文件大小</div><div class="v" data-f="size">${r.sizeText}</div></div>
         <div class="stat"><div class="k">分辨率</div><div class="v" data-f="res">${r.resText}</div></div>
       </div>
@@ -495,11 +506,10 @@ function renderCard(r0) {
   const dmCount = Number(r.danmakuCount) || 0;
   const dmStatus = r.danmakuStatus || 'off';
   const dmOn = dmStatus === 'on';
-  const dmHtml = (rec || dmCount > 0) ? `
+  const dmHtml = (r.danmaku && (rec || dmCount > 0)) ? `
     <div class="dm ${S.dmOpen.has(String(r.id)) ? 'open' : ''}">
       <div class="dm-head">
         <span>弹幕</span>
-        <span class="t" style="color:#5b6579;font-size:11px">${DM_TEXT[dmStatus] || ''}</span>
         ${dmOn ? '<span class="live"><i></i>LIVE</span>' : ''}
         <span class="chev">${svg(ICON.chev, 13)}</span>
       </div>
@@ -606,6 +616,7 @@ function patchRoom(snap) {
   };
   set('[data-f="start"]', view.startText);
   set('[data-f="elapsed"]', view.elapsedText);
+  set('[data-f="timer"]', view.timerText);
   set('[data-f="size"]', view.sizeText);
   set('[data-f="bitrate"]', view.bitrateText);
   set('[data-f="res"]', view.resText);

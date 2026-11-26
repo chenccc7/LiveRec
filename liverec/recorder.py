@@ -123,7 +123,6 @@ class RecordTask:
         self._part_seq = 0
         # 合并分片要串行：录制循环的定期 flush 和收尾线程可能同时跑
         self._shard_lock = threading.Lock()
-        self._shard_log: list[tuple[str, int, float]] = []
         self._shard_dur: dict[str, float] = {}
         self.size = 0
         self.size_text = "0 B"
@@ -238,7 +237,6 @@ class RecordTask:
         self._tmp_dir = ""
         self._part_seq = 0
         self._shard_lock = threading.Lock()
-        self._shard_log: list[tuple[str, int, float]] = []
         self._shard_dur = {}
         self.next_check_at = 0.0
         # 弹幕状态也得跟着清零：否则新一场的计数会从上一场的数字开始跳，
@@ -577,7 +575,7 @@ class RecordTask:
                 self._session_prefix = prefix
                 self._part_seq = 0
                 self._shard_dur = {}
-                self._shard_log = []
+                self._batch_reset()
         self._files_prefix = prefix
         # 分片先落在临时目录（和保存目录同一个盘，合并后 os.replace 秒级移动），
         # 攒够单段时长合并成成品后再放进保存目录。
@@ -907,19 +905,79 @@ class RecordTask:
         return dur
 
     def _manifest(self) -> str:
-        """分片清单文本：这一场的分片与合并结果都记在里面。"""
+        """成品清单（一行一个 partNNN）：录制中写在临时分片目录，收尾再挪进保存目录。"""
         prefix = self._session_prefix or self._files_prefix
-        return os.path.join(self.out_dir, f"{prefix}.index.txt") if prefix else ""
+        base = getattr(self, "_tmp_dir", "") or self.out_dir
+        return os.path.join(base, f"{prefix}.index.txt") if (prefix and base) else ""
 
     def _manifest_append(self, line: str) -> None:
         path = self._manifest()
         if not path:
             return
         try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(f"{datetime.now().strftime('%H:%M:%S')}\t{line}\n")
         except OSError:
             pass
+
+    def _batch_path(self, seq: int) -> str:
+        """这一批分片的清单文本（和分片一起躺在临时目录里）。"""
+        prefix = self._session_prefix or self._files_prefix
+        base = getattr(self, "_tmp_dir", "") or self.out_dir
+        if not prefix or not base:
+            return ""
+        return os.path.join(base, f"{prefix}_part{seq:03d}.shards.txt")
+
+    def _batch_target(self) -> float:
+        return float(getattr(self, "_split_time", 0) or self.cfg.split_seconds() or 600)
+
+    def _batch_reset(self) -> None:
+        self._batch_rows = []
+        self._batch_names = set()
+
+    def _write_batch_manifest(self, path: str, done: bool) -> None:
+        """把「这一批还没合并的分片」实时写进清单文本（每轮都整篇重写）。"""
+        if not path:
+            return
+        rows = list(getattr(self, "_batch_rows", []) or [])
+        total_size = sum(int(r[1] or 0) for r in rows)
+        total_secs = sum(float(r[2] or 0.0) for r in rows)
+        lines = [f"# {self.anchor or self.url} 分片清单（每行一个分片：文件名\t大小\t时长）"]
+        for name, size, dur in rows:
+            lines.append(f"{name}\t{_fmt_size(size)}\t{float(dur):.1f} 秒")
+        if done:
+            lines.append(f"# 合计 {len(rows)} 个分片\t{_fmt_size(total_size)}\t"
+                         f"{total_secs:.1f} 秒（{total_secs / 3600.0:.2f} 小时）")
+        else:
+            lines.append(f"# 已累计 {len(rows)} 个分片\t{_fmt_size(total_size)}\t"
+                         f"{total_secs:.1f} 秒（目标 {self._batch_target():.0f} 秒）")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError:
+            pass
+
+    def _move_manifests(self) -> None:
+        """收尾：把临时目录里的清单文本（*.txt）挪进保存目录。"""
+        tmp_dir = getattr(self, "_tmp_dir", "")
+        if not tmp_dir or not self.out_dir or not os.path.isdir(tmp_dir):
+            return
+        prefix = self._session_prefix or self._files_prefix
+        tail = f"{prefix}.index.txt"
+        moved = 0
+        for name in sorted(os.listdir(tmp_dir)):
+            # 只搬我们自己写的两份清单；ffmpeg 自己写的 *.index.txt 是分片原始列表，
+            # 留在保存目录只会让用户看着乱，收尾时随临时目录一起删掉。
+            if name != tail and not (name.startswith(f"{prefix}_part")
+                                    and name.endswith(".shards.txt")):
+                continue
+            with contextlib.suppress(OSError):
+                os.replace(os.path.join(tmp_dir, name),
+                           os.path.join(self.out_dir, name))
+                moved += 1
+        if moved:
+            log("INFO", f"{self.anchor or self.url} 分段清单已保存到 {self.out_dir}（{moved} 个文本）")
 
     async def _flush_ready_shards(self) -> None:
         if not self._shard_mode:
@@ -946,36 +1004,54 @@ class RecordTask:
                 lock.release()
 
     def _flush_ready_shards_locked(self, force: bool = False) -> None:
+        """攒分片 → 实时写清单 → 攒够单段时长就合并成 partNNN 并换一份新清单。
+
+        force=False：最后一片（ffmpeg 正在写）不动，刚切出来不到 1.5 秒的也不动；
+        force=True：这一场结束了，剩下的分片全部并成最后一个文件。
+        """
         tmp_dir = getattr(self, "_tmp_dir", "")
         prefix = self._session_prefix or self._files_prefix
         if not tmp_dir or not prefix or not self.out_dir:
             return
-        files = self._shard_files(tmp_dir, prefix, min_size=1)
-        if not files:
-            return
-        # 最后一片是 ffmpeg 正在写的，别动；刚切出来的也等 1.5 秒再说
-        ready = files if force else files[:-1]
-        now = time.time()
-        if not force:
-            ready = [p for p in ready if now - os.stat(p).st_mtime > 1.5]
-        if not ready:
-            return
-        target = float(self._split_time or self.cfg.split_seconds() or 600)
+        rows = getattr(self, "_batch_rows", None)
+        names = getattr(self, "_batch_names", None)
+        if rows is None or names is None:
+            self._batch_reset()
+            rows, names = self._batch_rows, self._batch_names
 
-        # 从最早的开始攒，攒够一段就合并一次（一次循环里可能并出好几个文件）
-        while ready:
-            group: list[str] = []
-            acc = 0.0
-            for path in ready:
-                group.append(path)
-                acc += self._shard_duration(path)
-                if not force and acc >= target:
-                    break
-            ready = ready[len(group):]
-            if not group:
+        while True:
+            files = self._shard_files(tmp_dir, prefix, min_size=1)
+            if not files:
                 break
-            if not force and acc < target:
-                # 还不够一段，留着下一轮继续攒
+            now = time.time()
+            if force:
+                settled = files
+            else:
+                # 最后一片可能还在写；刚切出来不到 1.5 秒的先不动
+                settled = [p for p in files[:-1]
+                           if now - os.stat(p).st_mtime > 1.5]
+            for path in settled:
+                name = os.path.basename(path)
+                if name in names:
+                    continue
+                try:
+                    size = os.stat(path).st_size
+                except OSError:
+                    continue
+                rows.append((name, size, self._shard_duration(path)))
+                names.add(name)
+            if rows:
+                # 清单实时更新（用户要求：文本要跟着分片走）
+                self._write_batch_manifest(self._batch_path(self._part_seq), False)
+
+            total = sum(float(r[2] or 0.0) for r in rows)
+            if not rows or (not force and total < self._batch_target()):
+                break
+
+            group = [os.path.join(tmp_dir, r[0]) for r in rows
+                     if os.path.exists(os.path.join(tmp_dir, r[0]))]
+            if not group:
+                self._batch_reset()
                 break
             name = f"{prefix}_part{self._part_seq:03d}"
             staged = os.path.join(tmp_dir, name + ".ts")
@@ -983,28 +1059,31 @@ class RecordTask:
             if not ok:
                 log("WARN", f"{self.anchor or self.url} 分片合并失败（分片已保留）：{msg}")
                 return
-            for path in group:
-                try:
-                    self._shard_log.append((os.path.basename(path),
-                                            os.stat(path).st_size,
-                                            self._shard_duration(path)))
-                except OSError:
-                    pass
-                with contextlib.suppress(OSError):
-                    os.remove(path)
             final = self._publish_part(staged, name)
             if not final:
                 log("WARN", f"{self.anchor or self.url} 分段成品转封装失败，TS 先留在临时目录：{name}.ts")
-                continue
+                return
+
+            # 这一批的清单定稿，跟着成品一起进保存目录；下一批用新的一份
+            man = self._batch_path(self._part_seq)
+            self._write_batch_manifest(man, True)
+            with contextlib.suppress(OSError):
+                os.replace(man, os.path.join(self.out_dir, os.path.basename(man)))
+            for path in group:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
+
+            seq = self._part_seq
             self._part_seq += 1
             self.segments = self._part_seq
             self._manifest_append(
-                f"part{self._part_seq - 1:03d}\t{os.path.basename(final)}\t"
-                f"{len(group)} 个分片\t{acc:.1f} 秒",
-            )
+                f"part{seq:03d}\t{os.path.basename(final)}\t"
+                f"{len(group)} 个分片\t{total:.1f} 秒")
             log("INFO", f"{self.anchor or self.url} 分段录制：{len(group)} 个分片合并成 "
-                        f"{os.path.basename(final)}（{acc:.1f} 秒）→ {self.out_dir}")
-
+                        f"{os.path.basename(final)}（{total:.1f} 秒）→ {self.out_dir}")
+            self._batch_reset()
+            if not force:
+                break
     def _publish_part(self, staged: str, name: str) -> str:
         """把临时目录里的 TS 成品按用户选的容器转一次，再挪进保存目录。
 
@@ -1032,56 +1111,6 @@ class RecordTask:
             log("WARN", f"{self.anchor or self.url} 成品落盘失败：{name}：{exc}")
             return ""
 
-    def _keep_shard_index(self, tmp_dir: str, prefix: str) -> None:
-        """把 ffmpeg 写的分片清单搬到保存目录，作为这一场的分片记录。"""
-        if not tmp_dir or not os.path.isdir(tmp_dir):
-            return
-        lines: list[str] = []
-        seen: set[str] = set()
-        total_secs = 0.0
-        total_bytes = 0
-        for item in getattr(self, "_shard_log", []):
-            name, size = item[0], item[1]
-            dur = float(item[2]) if len(item) > 2 else 0.0
-            total_secs += dur
-            total_bytes += int(size or 0)
-            seen.add(name)
-            lines.append(f"{name}\t{_fmt_size(size)}\t{dur:.1f} 秒")
-        for name in sorted(os.listdir(tmp_dir)):
-            if not name.endswith(".index.txt"):
-                continue
-            try:
-                with open(os.path.join(tmp_dir, name), encoding="utf-8",
-                          errors="replace") as f:
-                    for raw in f:
-                        item = raw.strip()
-                        if not item:
-                            continue
-                        size = ""
-                        with contextlib.suppress(OSError):
-                            size = _fmt_size(os.stat(item).st_size)
-                        dur = self._shard_dur.get(item, 0.0)
-                        base = os.path.basename(item)
-                        if base in seen:
-                            continue
-                        seen.add(base)
-                        lines.append(f"{base}\t{size or '—'}\t{dur:.1f} 秒")
-            except OSError:
-                continue
-        if not lines:
-            return
-        path = os.path.join(self.out_dir, f"{prefix}.shards.txt")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(f"# {self.anchor or self.url} 分片清单"
-                        f"（每行一个分片：文件名\t大小\t时长）\n")
-                f.write("\n".join(lines) + "\n")
-                f.write(f"# 合计 {len(lines)} 个分片\t{_fmt_size(total_bytes)}"
-                        f"\t{total_secs:.1f} 秒（{total_secs / 3600:.2f} 小时）\n")
-        except OSError:
-            return
-        log("INFO", f"{self.anchor or self.url} 分片清单已保存："
-                    f"{os.path.basename(path)}（{len(lines)} 个分片）")
 
     def _finalize_shards(self, blocking: bool = False) -> None:
         """这一场结束：把临时目录里剩下的分片全部并成最后一个成品文件。"""
@@ -1098,10 +1127,8 @@ class RecordTask:
             except Exception as exc:  # noqa: BLE001
                 log("WARN", f"{self.anchor or self.url} 收尾合并失败（分片已保留）："
                             f"{type(exc).__name__}: {exc}")
-            # 把 ffmpeg 自己写的分片清单（临时目录里的 *.index.txt）留下当记录，
-            # 用户要的「用个文本记录每个分片」就在这里。
-            self._keep_shard_index(tmp_dir, prefix)
-            # 临时目录里剩下的 0 字节 / 孤立分片清掉
+            # 清单文本（成品清单 + 每批分片清单）从临时目录挪进保存目录
+            self._move_manifests()
             try:
                 for name in os.listdir(tmp_dir):
                     with contextlib.suppress(OSError):
@@ -1118,7 +1145,6 @@ class RecordTask:
             threading.Thread(target=work, daemon=True).start()
         self._session_prefix = ""
         self._shard_mode = False
-
     def _remember_part(self) -> None:
         """把刚录完的那一段记下来，等这场直播结束统一拼接成一个文件。
 
