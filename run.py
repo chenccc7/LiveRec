@@ -129,11 +129,17 @@ class Controller:
             self.window.close()
 
 
-def find_running_instance(start: int = 8765, end: int = 8795) -> str | None:
-    """如果已经有一个 LiveRec 在跑，返回它的地址（用于「重复双击只唤回窗口」）。"""
+def find_running_instance(start: int = 8765, end: int = 8795) -> tuple[str, str] | None:
+    """如果同一个程序目录下已经有一个 LiveRec 在跑，返回 (地址, 程序目录)。
+
+    注意：只认同「同一个 app_root」的实例。把整个文件夹复制到别的盘再启动时，
+    那是另一份独立程序（有自己的 data 和设置），不能去唤回旧实例的窗口，
+    否则界面/日志里显示的还是旧目录的路径。
+    """
     import json
     import urllib.request
 
+    local_root = os.path.normcase(os.path.abspath(paths.app_root()))
     for port in range(start, end):
         url = f"http://127.0.0.1:{port}"
         try:
@@ -141,8 +147,15 @@ def find_running_instance(start: int = 8765, end: int = 8795) -> str | None:
                 data = json.loads(resp.read().decode("utf-8", "ignore"))
         except Exception:
             continue
-        if isinstance(data, dict) and data.get("version"):
-            return url
+        if not (isinstance(data, dict) and data.get("version")):
+            continue
+        remote_root = str(data.get("appRoot") or "")
+        if not remote_root:
+            # 老版本没有 appRoot 字段：退回「唤回窗口」的老行为
+            return url, ""
+        if os.path.normcase(os.path.abspath(remote_root)) == local_root:
+            return url, remote_root
+        # 别的目录里的 LiveRec，互不干扰，继续找自己的端口
     return None
 
 
@@ -224,14 +237,16 @@ def main() -> int:
 
     paths.seed_config()
 
-    # 已经有一个实例在录：把窗口唤到前台就好，不要再起第二个录制进程
+    # 同一个程序目录已经有一个实例在录：把窗口唤到前台就好，不要再起第二个录制进程。
+    # 别的目录里复制出来的 LiveRec 是另一份程序（有自己的 data/设置），照常单独启动。
     if not args.headless and not args.no_window:
         existing = find_running_instance()
         if existing:
-            log("INFO", f"检测到 LiveRec 已在运行（{existing}），直接唤回窗口")
+            url, _root = existing
+            log("INFO", f"检测到同一目录的 LiveRec 已在运行（{url}），直接唤回窗口")
             from liverec.desktop import AppWindow
 
-            AppWindow(existing, "LiveRec 控制台").show()
+            AppWindow(url, "LiveRec 控制台").show()
             return 0
 
     from liverec import server as srv  # 延迟导入，确保配置已就绪

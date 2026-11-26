@@ -265,6 +265,7 @@ async def favicon_static():
 async def api_state():
     return {
         "version": APP_VERSION,
+        "appRoot": paths.app_root(),
         "rooms": manager.snapshot(),
         "stats": manager.stats(),
         "settings": cfg.to_dict(),
