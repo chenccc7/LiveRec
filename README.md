@@ -1,6 +1,6 @@
 # LiveRec 控制台
 
-抖音 / B站 / 虎牙 / 斗鱼 多房间直播录制 + 弹幕采集，单文件 exe，内置 ffmpeg。
+抖音 / B站 / 虎牙 / 斗鱼 多房间直播录制 + 弹幕采集，免安装的绿色文件夹版（`LiveRec\`），内置 ffmpeg。
 
 ![主界面：多房间同时录制，每张卡片带弹幕与自动/手动开关](docs/screenshot-main.png)
 
@@ -103,13 +103,12 @@ ffmpeg 解析相对 URI 时会丢掉 playlist 上的签名 query（`expires/sign
 
 ## 快速开始
 
-### 用打包好的 exe
+### 用打包好的文件夹版
 
-1. 把 `LiveRec.exe` 放到任意可写目录（建议独立文件夹），双击启动
+1. 把整个 `LiveRec\` 文件夹放到任意可写目录，双击里面的 `LiveRec.exe` 启动（整个文件夹一起拷走即可，别只拷 exe）
 2. 先出现带进度条的启动画面，服务就绪后自动切到控制台
 3. 点「添加直播间」粘贴链接即可；关掉窗口不影响录制，点托盘图标可再唤回
-4. 录像与弹幕默认落在 exe 同级的 `data/` 目录
-5. 每张卡片右上角的「自动 / 手动」决定它下次启动会不会自动监测：点一下就能切开（绿=自动、灰=手动），关程序时会记住
+4. 录像与弹幕默认落在 `LiveRec\data\downloads\`（可在设置里改保存路径）
 6. 托盘右键菜单里选「退出 LiveRec」才会真正停止录制并退出
 
 > 窗口用 Edge/Chrome 的 `--app` 无地址栏模式打开（Win10/11 自带 Edge，无需额外安装）。
@@ -122,11 +121,11 @@ ffmpeg 解析相对 URI 时会丢掉 playlist 上的签名 query（`expires/sign
 
 ![添加直播间](docs/screenshot-add.png)
 
-每张卡片右上角两个独立开关——绿「自动」= 下次启动自动监测、灰「手动」= 保持待机；蓝「弹幕」= 这场是否采弹幕：
+卡片：状态胶囊（录制中是计时器）、平台/画质标签、头像、标题、文件大小/码率/分辨率、当前分段进度、弹幕抽屉：
 
-![卡片上的自动/弹幕开关](docs/screenshot-main.png)
+![控制台主界面](docs/screenshot-main.png)
 
-托盘常驻：关掉窗口录制照常继续，右键托盘图标可以唤回控制台 / 全部开始 / 全部停止 / 打开录制目录 / 切换无人值守 / 退出。
+托盘常驻：关掉窗口录制照常继续，右键托盘图标可以唤回控制台 / 全部开始 / 全部停止 / 打开录制目录 / 退出。
 
 ### 用源码
 
@@ -157,7 +156,7 @@ data/
     app_YYYY-MM-DD.log
 ```
 
-> ⚠️ 配置跟着「程序所在目录」走：`dist\LiveRec.exe` 读的是 `dist\data\config\config.ini`，源码方式 `python run.py` 读的是项目根 `data\config\config.ini`——两边是**两份独立配置**。在源码里填的 Cookie 不会自动出现在 exe 里，反过来也一样；想在哪个方式下用，就在那个界面里再存一次（或用同一份 `config.ini` 覆盖过去）。
+> ⚠️ 配置跟着「程序所在目录」走：`dist\LiveRec\LiveRec.exe` 读的是 `dist\LiveRec\data\config\config.ini`，源码方式 `python run.py` 读的是项目根 `data\config\config.ini`——两边是**两份独立配置**。在源码里填的 Cookie 不会自动出现在打包版里，反过来也一样；想在哪个方式下用，就在那个界面里再存一次（或用同一份 `config.ini` 覆盖过去）。
 
 ## 弹幕数据格式
 
@@ -175,7 +174,7 @@ data/
 
 ## 设置项
 
-界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 ffmpeg，解压在程序目录下的 `runtime\`）**、循环检测间隔（秒）、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
+界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 ffmpeg，位于 `_internal\bin\ffmpeg.exe`）**、循环检测间隔（秒）、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
 
 ![全局设置：保存路径 / 弹幕路径 / ffmpeg 路径 / 检测间隔 / 四平台 Cookie](docs/screenshot-settings.png)
 
@@ -224,21 +223,29 @@ data/
 - **点「停止录制」会当场收尾**：开分段时把临时目录里剩下的分片并成最后一个成品（一般 1–2 秒）、把分片清单归档到 `data\manifests\`、删掉临时目录；没开分段时当场合并成 `<名字>_merged.<你选的格式>`，日志里能看到「停止后已合并 N 个分段 → …」。自动结束（下播/ffmpeg 自己退出）走后台线程，不占界面。
 - B站未登录时拿不到「原画」，接口会把任何 `qn` 都压到「超清」——所以「添加/编辑直播间」的画质下拉**只列这个房间当前真的能拿到的档位**（未登录就是「超清」一档，并写明原因），不会让你选一个必然被降级的档位；如果卡片上的画质不是你要的（例如老房间还存着「原画」），标签会显示成橙色的「超清·降级」，鼠标停上去能看到原因。改完画质会自动重建该房间的录制任务，新档位立即生效。填登录 Cookie 后会出现原画/蓝光等档位
 - 拉流默认关闭 TLS 证书校验（部分直播 CDN 证书链不完整，开启会导致整场录不到）；仅用于公开直播流
-- 单文件 exe 首次启动需解压运行时（约 5～8 秒），之后正常
+- 文件夹版启动不需要解压，1～2 秒就能出控制台（内置 ffmpeg 直接放在 `_internal\bin\ffmpeg.exe`）
 - 托盘图标加不上（极少数受限环境）时会自动降级成普通窗口模式，此时关窗即退出，日志里会写明原因
 
 ## 打包
 
 ```bash
-python -m PyInstaller --noconfirm LiveRec.spec     # 产物 dist/LiveRec.exe（约 72MB，内嵌 ffmpeg 与 V8）
+python -m PyInstaller --noconfirm LiveRec.spec     # 产物是 dist/LiveRec/ 文件夹（LiveRec.exe + _internal\，合计约 250MB）
 ```
 
 `LiveRec.spec` 已内嵌：`web/` 前端、`core/config` 默认配置模板、`core/src`（虎牙/斗鱼等平台的兜底解析实现）、`bin/ffmpeg.exe`、托盘图标 `bin/liverec.ico`、抖音弹幕签名脚本 `liverec/danmaku/assets/sign.js` 与 `py-mini-racer` 的 V8 运行时。抖音、B站、虎牙、斗鱼都走程序内置实现，运行期不需要 Node.js 或 `execjs`。
 
-### 关于 `runtime\` 目录
+### 目录结构
 
-单文件 exe 每次启动都要把内置的 ffmpeg 等资源解压出来用。现在**解压到程序自己所在目录下的 `runtime\`**（例如 `dist\runtime\_MEIxxxxxx\`），不再写系统临时目录 `%TEMP%`：
+现在打的是**文件夹模式**（PyInstaller onedir），不再每次启动往临时目录解压：
 
-- 程序退出时会自动删掉这次的 `_MEIxxxxxx`；如果崩溃或被强杀留下了残留，下次启动会自动清理（只留当前这一次的）；
-- 所以启动前请保证程序所在目录**可写**（放在 `C:\Program Files` 里会失败，放到任意普通目录即可）；
-- 解压目录是按**启动时的当前目录 + `runtime`** 算的，正常双击程序目录里的 `LiveRec.exe` 就落在旁边；如果从别的目录命令行启动，可能落到那个目录下，启动日志里会有一行「解压目录：…」或警告提示。想固定的话，把快捷方式的「起始位置」设成程序目录。
+```
+LiveRec\                      ← 整个文件夹搬走就能用
+├─ LiveRec.exe                 ← 双击这个（17MB，启动 1～2 秒）
+├─ _internal\                  ← 运行时资源：python 运行时、内置 ffmpeg(105MB)、web 前端、core 配置模板
+├─ data\                       ← 程序自己的数据：config.ini(含 Cookie)、logs、danmaku、downloads、manifests
+└─ runtime\                    ← 只有老的单文件版才会生成，文件夹模式不出现
+```
+
+- 想换电脑：**整个 `LiveRec\` 文件夹**复制过去即可（`data\config\config.ini` 里有 Cookie，注意别外传）；
+- `data\` 跟程序目录走：`dist\LiveRec\LiveRec.exe` 读的是 `dist\LiveRec\data\config\config.ini`；
+- 只有 exe 没有 `_internal\` 是跑不起来的，所以**别只拷 exe**。

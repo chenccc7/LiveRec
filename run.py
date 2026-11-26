@@ -151,12 +151,11 @@ _RUNTIME_NOTE: tuple[str, str] | None = None
 
 
 def _prepare_frozen_runtime() -> None:
-    """单文件 exe 的解压目录固定到「程序所在目录\\runtime」。
+    """打包态的目录规整（文件夹模式 onedir 与单文件模式都适用）。
 
-    PyInstaller 的 ``runtime_tmpdir``（见 LiveRec.spec）写的是相对路径 ``runtime``，
-    它是按**进程启动时的当前目录**解析的，所以这里先把工作目录切到 exe 所在目录，
-    顺带让 data/ downloads/ 这些相对路径也统一落在程序目录下。
-    另外清掉上次异常退出（崩溃/强杀）残留的 ``_MEIxxxx`` 解压目录。
+    1. 把工作目录切到 exe 所在目录，让 ``data\\``、``downloads\\`` 这些相对路径
+       统一落在程序目录下（不管从哪里启动）；
+    2. 如果存在单文件模式留下的 ``runtime\\_MEIxxxx`` 解压目录，顺手清掉历史残留。
     """
     if not getattr(sys, "frozen", False):
         return
@@ -169,10 +168,16 @@ def _prepare_frozen_runtime() -> None:
 
     runtime = os.path.join(exe_dir, "runtime")
     mei = os.path.abspath(getattr(sys, "_MEIPASS", "") or "")
+
+    # 文件夹模式：_MEIPASS 就是 <exe目录>\_internal，没有临时解压这一层
+    if not os.path.isdir(runtime) and mei.lower().startswith(exe_dir.lower()):
+        _RUNTIME_NOTE = ("INFO", f"程序目录：{exe_dir}（文件夹模式，资源在 _internal 里）")
+        return
+
+    # 单文件模式：解压目录应该在 <exe目录>\runtime 下
     if mei and not mei.lower().startswith(runtime.lower()):
         _RUNTIME_NOTE = ("WARN", f"本次解压到了 {mei}，不在程序目录下的 runtime\\"
                                  "（从别的目录启动就会这样，建议双击程序目录里的 LiveRec.exe）")
-        log(*_RUNTIME_NOTE)
         return
 
     # 只保留当前这次用的解压目录，其余 _MEIxxxx 都是上次残留
@@ -189,7 +194,6 @@ def _prepare_frozen_runtime() -> None:
     except OSError:
         pass
     _RUNTIME_NOTE = ("INFO", f"解压目录：{runtime}")
-    log(*_RUNTIME_NOTE)
 
 
 def _enable_faulthandler() -> None:

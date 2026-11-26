@@ -85,8 +85,6 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name="LiveRec",
     icon="bin/liverec.ico",
@@ -96,6 +94,16 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    # 解压目录：相对路径，按启动时的当前目录解析；run.py 会先 chdir 到 exe 目录
-    runtime_tmpdir="runtime",
+    # 文件夹模式（onedir）：资源放在 exe 旁边的 _internal\，启动时不再往临时目录解压
+    exclude_binaries=True,
 )
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="LiveRec",
+)
+

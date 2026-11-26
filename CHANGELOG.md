@@ -4,6 +4,8 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **打包改为文件夹模式（onedir）**：`LiveRec.spec` 从单文件改为 `EXE(exclude_binaries=True) + COLLECT`，产物是 `dist\LiveRec\`（`LiveRec.exe` 17.8MB + `_internal\` 含内置 ffmpeg 105MB）。好处：启动不再往临时目录解压 100MB+，1～2 秒出控制台；目录结构透明（`_internal\bin\ffmpeg.exe`、`data\`、`data\manifests\`）；坏处：分发要整个文件夹（不能只拷 exe）。`run.py::_prepare_frozen_runtime()` 同时兼容两种模式：文件夹模式只把工作目录切到 exe 目录并记一行「程序目录：…」，单文件模式才去清 `runtime\_MEIxxxx` 残留。
+
 - **分片清单不再放进保存路径**：`liverec/recorder.py` 新增 `_manifests_dir()`（= `<程序目录>\data\manifests`），每批清单定稿后 `os.replace` 到该目录，`_move_manifests()` 也改成把残留清单归档到这里；效果是**保存目录里只有成品视频**（一行 txt 都没有），分片清单仍然保留、可以查，只是位置换到了程序自己的 data 目录下（日志「分段清单已归档到 …」）。
 
 - **单文件 exe 的解压目录改到程序目录下**：`LiveRec.spec` 加 `runtime_tmpdir="runtime"`，`run.py` 新增 `_prepare_frozen_runtime()`——启动时把工作目录切到 exe 所在目录、清掉上次异常退出残留的 `_MEIxxxx`、并在日志里记一行「解压目录：…」。效果：内置 ffmpeg 解压到 `<程序目录>\runtime\_MEIxxxx\bin\ffmpeg.exe`，不再写 `%TEMP%`；`data\`、`downloads\` 等相对路径也统一落在程序目录下。注意 `runtime_tmpdir` 是相对**启动时的当前目录**解析的，双击程序目录里的 exe 即在旁边；从别处启动会落到别处并记一条 WARN。
