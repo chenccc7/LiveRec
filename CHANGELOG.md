@@ -4,6 +4,8 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **分片清单不再放进保存路径**：`liverec/recorder.py` 新增 `_manifests_dir()`（= `<程序目录>\data\manifests`），每批清单定稿后 `os.replace` 到该目录，`_move_manifests()` 也改成把残留清单归档到这里；效果是**保存目录里只有成品视频**（一行 txt 都没有），分片清单仍然保留、可以查，只是位置换到了程序自己的 data 目录下（日志「分段清单已归档到 …」）。
+
 - **单文件 exe 的解压目录改到程序目录下**：`LiveRec.spec` 加 `runtime_tmpdir="runtime"`，`run.py` 新增 `_prepare_frozen_runtime()`——启动时把工作目录切到 exe 所在目录、清掉上次异常退出残留的 `_MEIxxxx`、并在日志里记一行「解压目录：…」。效果：内置 ffmpeg 解压到 `<程序目录>\runtime\_MEIxxxx\bin\ffmpeg.exe`，不再写 `%TEMP%`；`data\`、`downloads\` 等相对路径也统一落在程序目录下。注意 `runtime_tmpdir` 是相对**启动时的当前目录**解析的，双击程序目录里的 exe 即在旁边；从别处启动会落到别处并记一条 WARN。
 
 - **录制中胶囊改成「录制时长」**（用户指出上一版把方向做反了）：`web/app.js` 状态胶囊从「录制中 20:05:13」（开始时刻）改成「录制中 00:12:34」（计时器），按 `startedAt` 算、每秒刷新、与文件长短无关；开始时刻挪到胶囊的悬停提示里。空闲卡片那格恢复成「已录时长」。

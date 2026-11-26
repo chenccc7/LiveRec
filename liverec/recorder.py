@@ -958,24 +958,33 @@ class RecordTask:
         except OSError:
             pass
 
+    def _manifests_dir(self) -> str:
+        """分片清单的归档目录：程序数据目录下的 manifests\\（绝不往保存路径里塞 txt）。"""
+        try:
+            path = os.path.join(paths.data_dir(), "manifests")
+            os.makedirs(path, exist_ok=True)
+            return path
+        except OSError:
+            return ""
+
     def _move_manifests(self) -> None:
-        """收尾：把临时目录里的清单文本（*.txt）挪进保存目录。"""
+        """收尾：把临时目录里还没归档的清单文本挪到 data\\manifests\\。"""
         tmp_dir = getattr(self, "_tmp_dir", "")
-        if not tmp_dir or not self.out_dir or not os.path.isdir(tmp_dir):
+        dest = self._manifests_dir()
+        if not tmp_dir or not dest or not os.path.isdir(tmp_dir):
             return
         prefix = self._session_prefix or self._files_prefix
         moved = 0
         for name in sorted(os.listdir(tmp_dir)):
-            # 只把「这一批分片清单」跟着成品搬进保存目录；
-            # 整场成品清单（<名字>.index.txt）和 ffmpeg 自己的分片原始列表都不搬，随临时目录删掉。
+            # 只归档「这一批分片清单」；整场成品清单（<名字>.index.txt）和
+            # ffmpeg 自己的分片原始列表都随临时目录删掉。
             if not (name.startswith(f"{prefix}_part") and name.endswith(".shards.txt")):
                 continue
             with contextlib.suppress(OSError):
-                os.replace(os.path.join(tmp_dir, name),
-                           os.path.join(self.out_dir, name))
+                os.replace(os.path.join(tmp_dir, name), os.path.join(dest, name))
                 moved += 1
         if moved:
-            log("INFO", f"{self.anchor or self.url} 分段清单已保存到 {self.out_dir}（{moved} 个文本）")
+            log("INFO", f"{self.anchor or self.url} 分段清单已归档到 {dest}（{moved} 个文本）")
 
     async def _flush_ready_shards(self) -> None:
         if not self._shard_mode:
@@ -1062,11 +1071,13 @@ class RecordTask:
                 log("WARN", f"{self.anchor or self.url} 分段成品转封装失败，TS 先留在临时目录：{name}.ts")
                 return
 
-            # 这一批的清单定稿，跟着成品一起进保存目录；下一批用新的一份
+            # 这一批的清单定稿后归档到 data\manifests\，不放进保存路径；下一批用新的一份
             man = self._batch_path(self._part_seq)
             self._write_batch_manifest(man, True)
-            with contextlib.suppress(OSError):
-                os.replace(man, os.path.join(self.out_dir, os.path.basename(man)))
+            dest = self._manifests_dir()
+            if dest:
+                with contextlib.suppress(OSError):
+                    os.replace(man, os.path.join(dest, os.path.basename(man)))
             for path in group:
                 with contextlib.suppress(OSError):
                     os.remove(path)
