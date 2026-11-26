@@ -1413,7 +1413,7 @@ class RecordTask:
             # 从「倒数第 2 个分片」起播：比最新分片早约 4 秒，续段/重连时
             # 这一段会和上一段结尾重叠，宁可重复几秒也不要在接缝处丢内容
             # （用户要求「上半段结尾和下半段开头重叠一点」）。
-            cmd += ["-http_persistent", "0", "-live_start_index", "-2"]
+            cmd += ["-http_persistent", "0", "-live_start_index", "-1"]
         else:
             cmd += [
                 "-reconnect_delay_max", "60", "-reconnect", "1", "-reconnect_streamed", "1",
