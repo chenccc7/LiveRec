@@ -797,6 +797,9 @@ class RecordTask:
                 self._elapsed_base = (getattr(self, "_elapsed_base", 0.0)
                                       + max(0.0, time.time() - self._live_since))
                 self.elapsed = self._elapsed_base
+                # 累计进 base 之后必须把起点也挪到「现在」，否则 snapshot 里
+                # base + (now - live_since) 会把同一段时间算两遍（时长瞬间跳高）。
+                self._live_since = time.time()
                 self._huya_stall_streak = 0
             # 只有一条线路，录到了就继续（虎牙走分片续录），没录到就回等待开播。
             healthy = chunk_bytes > 512 * 1024 or (code in (0, None) and self.elapsed >= 20)
