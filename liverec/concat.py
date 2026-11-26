@@ -237,6 +237,60 @@ def remux(src: str, fmt: str) -> tuple[bool, str]:
     return False, "转封装失败：" + last
 
 
+_SEG_FORMAT = {
+    "ts": "mpegts",
+    "mkv": "matroska",
+    "flv": "flv",
+    "mp4": "mp4",
+}
+
+
+def split_session(src: str, seconds: int, target_fmt: str = "") -> tuple[int, str]:
+    """把整场文件按「分段时间」切成多段（-c copy，不重编码）。
+
+    虎牙是按签名续段的，每一段都比用户设置的分段时间短，ffmpeg 的
+    `-f segment` 永远等不到切点，所以「分段录制」在虎牙上等于没生效。
+    整场拼接完成后再按分段时间切一次，用户拿到的才是真正的 N 分钟一个文件。
+    """
+    if seconds <= 0 or not os.path.isfile(src):
+        return 0, "无需分段"
+    out_dir = os.path.dirname(os.path.abspath(src))
+    stem, ext = os.path.splitext(os.path.basename(src))
+    if stem.endswith("_merged"):
+        # 切分对象是「拼接后的整场文件」，成品名不要带上 _merged，否则
+        # 出来的是 …_merged_part000.flv，和场次名对不上。
+        stem = stem[: -len("_merged")]
+    if target_fmt:
+        ext = "." + target_fmt
+    pattern = os.path.join(out_dir, f"{stem}_part%03d{ext}")
+    cmd = [
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        "-i", src,
+        "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy",
+        "-f", "segment", "-segment_time", str(int(seconds)),
+        "-reset_timestamps", "1",
+        "-segment_format", _SEG_FORMAT.get((target_fmt or ext.lstrip(".")).lower(), "flv"),
+        pattern,
+    ]
+    rc, err = _run(cmd)
+    made = sorted(
+        n for n in os.listdir(out_dir)
+        if n.startswith(f"{stem}_part") and n.endswith(ext)
+    )
+    if len(made) <= 1:
+        # 整场还不够一个分段时间（或关键帧太稀），切出来只有一个文件 ——
+        # 这个文件就是原文件的副本，留着只会让人以为「分段了」，删掉。
+        for name in made:
+            try:
+                os.remove(os.path.join(out_dir, name))
+            except OSError:
+                pass
+        if rc != 0:
+            return 0, (err.splitlines()[-1] if err else "切分失败")
+        return 0, "整场不足一个分段时间"
+    return len(made), "、".join(made[:2]) + ("…" if len(made) > 2 else "")
+
+
 def convert_session(path: str, target_fmt: str = "") -> None:
     """只有一段时的收尾：直接按用户选的容器转封装（虎牙中间文件固定是 FLV）。"""
     label = os.path.basename(path)

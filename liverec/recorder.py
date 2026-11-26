@@ -508,6 +508,11 @@ class RecordTask:
         fmt = cfg.save_format()
         split = cfg.split_enabled()
         split_time = cfg.split_seconds()
+        # 虎牙必须自己控制单段时长：签名到期/流卡住时一段可能录到十几分钟，
+        # 中间任何一次出错就是整段有问题。主动切段把风险压到「最多一段」。
+        self._chunk_max = 0.0
+        if self.platform == "huya":
+            self._chunk_max = float(min(split_time, 180) if split else 180)
         anchor = safe_name(self.anchor, self.platform)
         root = cfg.save_root()
         platform_label = PLATFORM_LABEL.get(self.platform, "其它")
@@ -538,11 +543,17 @@ class RecordTask:
         # 那样只会让卡片看起来一直在录、实际什么都没录进去。
         candidates: list[str] = [stream_url]
 
+        # 虎牙的「分段」由程序自己控制（到点切断、换新签名续录），不能让 ffmpeg
+        # 再按 -segment_time 切一遍：两套切法叠在一起，一段会碎成 _000/_001，
+        # 而收尾拼接收到的只有最后一个文件名，前面那些片段就被漏掉了。
+        # 用户要的「N 分钟一个文件」在整场收尾合并后再按分段时间切。
+        ffmpeg_split = split and self.platform != "huya"
+
         def make_pattern(index: int) -> str:
             # 每条候选线路用独立文件名：否则后一条线路重开会把前一条已录的数据覆盖掉，
             # 表现就是「录了一会儿文件变小/前面内容没了」。
             stem = prefix if index == 0 else f"{prefix}_{index + 1}"
-            name = f"{stem}_%03d.{ext}" if split else f"{stem}.{ext}"
+            name = f"{stem}_%03d.{ext}" if ffmpeg_split else f"{stem}.{ext}"
             return os.path.join(out_dir, name)
 
         out_pattern = make_pattern(0)
@@ -576,7 +587,7 @@ class RecordTask:
             target = proxy.local_url if proxy else candidate
             out_pattern = make_pattern(index)
             self.current_file = os.path.basename(out_pattern.replace("%03d", "000"))
-            cmd = self._build_cmd(target, out_pattern, chunk_fmt, split, split_time,
+            cmd = self._build_cmd(target, out_pattern, chunk_fmt, ffmpeg_split, split_time,
                                   allow_any_ext=bool(proxy))
             try:
                 spawn_kwargs: dict[str, Any] = {}
@@ -633,11 +644,23 @@ class RecordTask:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
                     break
+                # 虎牙主动切段：录满单段上限就正常收尾、换新签名接着录。
+                # 不是出错，日志里单独记一条，方便和「无写入」区分。
+                if (self.platform == "huya" and self._chunk_max
+                        and time.time() - attempt_started > self._chunk_max
+                        and self.size > self._base_bytes):
+                    log("INFO", f"{anchor} 这一段录满 {int(self._chunk_max)} 秒，"
+                                f"正常切段续录")
+                    if self._proc:
+                        with contextlib.suppress(ProcessLookupError):
+                            self._proc.terminate()
+                    break
                 # 虎牙专用：已经录到过数据、但这一段 20 秒没有任何增长。
                 # 这不是「停录」，而是换一条新签名的地址接着录（每段单独落文件），
                 # 否则 ffmpeg 会挂在那里不动、卡片一直显示「录制中」但体积不变。
                 if (self.platform == "huya"
                         and (self.size > self._base_bytes or self._chunk_index > 0)
+                        and time.time() - attempt_started > 20.0
                         and time.time() - self._last_growth > 8.0):
                     # 只要 8 秒没写入就直接丢掉这条地址、重新问接口拿新地址（换 CDN），
                     # 不再对旧地址重算签名——旧地址要么已过期、要么被 CDN 限流，重签没用。
@@ -648,7 +671,9 @@ class RecordTask:
                         self._no_data = True
                         self._no_data_streak = 2
                     else:
-                        log("WARN", f"{anchor} 这 8 秒没有再写入数据，丢掉这条地址换新地址接着录")
+                        log("WARN", f"{anchor} 这 8 秒没有再写入数据"
+                                    f"（已写入 {_fmt_size(self.size - self._base_bytes)}），"
+                                    f"丢掉这条地址换新地址接着录")
                     if self._proc:
                         with contextlib.suppress(ProcessLookupError):
                             self._proc.terminate()
@@ -840,6 +865,8 @@ class RecordTask:
             log("INFO" if ok else "WARN",
                 f"{self.anchor or self.url} 已合并 {len(parts)} 个分段 → "
                 f"{os.path.basename(out)}（{message or 'ok'}）")
+            if ok:
+                await self._split_if_needed(out, target_fmt, loop)
         else:
             threading.Thread(
                 target=concat.merge_session,
@@ -847,6 +874,33 @@ class RecordTask:
                 daemon=True,
                 name="concat",
             ).start()
+
+    async def _split_if_needed(self, merged: str, target_fmt: str, loop) -> None:
+        """用户开了「分段录制」时，把合并后的整场文件再按分段时间切开。
+
+        虎牙的分段是「签名续段」，每段都短于设置的分段时间，ffmpeg 的
+        segment 永远等不到切点；只在收尾合并后切一次，用户才真的拿到
+        N 分钟一个文件。
+        """
+        try:
+            enabled = self.cfg.split_enabled()
+            seconds = int(self.cfg.split_seconds() or 0)
+        except Exception:  # noqa: BLE001
+            return
+        if not enabled or seconds <= 0 or not os.path.isfile(merged):
+            return
+        count, detail = await loop.run_in_executor(
+            None, concat.split_session, merged, seconds, target_fmt)
+        if count <= 1:
+            log("INFO", f"{self.anchor or self.url} 整场不足分段时长"
+                        f"（{seconds} 秒），保持单文件：{os.path.basename(merged)}")
+            return
+        log("SUCCESS", f"{self.anchor or self.url} 已按 {seconds} 秒分段切成 {count} 个文件"
+                    f"（{detail}）")
+        try:
+            os.remove(merged)
+        except OSError:
+            pass
 
     def _sweep_empty_files(self) -> None:
         """扫一遍本房间的输出目录，删掉 0 字节的空壳文件。
@@ -910,6 +964,7 @@ class RecordTask:
         cmd += [
             "-i", stream_url,
             "-bufsize", "8000k", "-max_muxing_queue_size", "1024",
+            "-flush_packets", "1",
         ]
         seg = ["-f", "segment", "-segment_time", str(split_time), "-reset_timestamps", "1"]
         if fmt == "mp3":
@@ -1014,7 +1069,10 @@ class RecordTask:
         except OSError:
             return
         if total:
-            if self._base_bytes + total != self.size:
+            # 磁盘上的大小是懒更新的（Windows 关闭句柄前目录项可能一直是旧值），
+            # 只认「涨」，不能把 ffmpeg 自报的 total_size 再压回去，否则会误判成停写。
+            total = max(total, self.size - self._base_bytes)
+            if self._base_bytes + total > self.size:
                 self._last_growth = time.time()
             self.size = self._base_bytes + total
             self.size_text = _fmt_size(self.size)
