@@ -110,6 +110,9 @@ class RecordTask:
         # 虎牙一场会被切成多段，已录时长要跨段累计，不能每段归零
         self._elapsed_base = 0.0
         self._huya_stall_streak = 0
+        # 分片模式（虎牙 + 开了分段录制）：ffmpeg 直接按分片写成品文件
+        self._shard_mode = False
+        self._session_prefix = ""
         self.size = 0
         self.size_text = "0 B"
         self.bitrate = ""
@@ -218,6 +221,8 @@ class RecordTask:
         # 虎牙一场会被切成多段，已录时长要跨段累计，不能每段归零
         self._elapsed_base = 0.0
         self._huya_stall_streak = 0
+        self._shard_mode = False
+        self._session_prefix = ""
         self.next_check_at = 0.0
         # 弹幕状态也得跟着清零：否则新一场的计数会从上一场的数字开始跳，
         # 卡片上的「弹幕 N 条」就会一会儿大一会儿小。
@@ -248,7 +253,9 @@ class RecordTask:
         # 这里是同步等待合并完成：用户点完「停止」就应该在目录里看到完整文件，
         # 而不是过一会儿才出现（删卡片时可能连进程都已经被关掉了）。
         self._refresh_disk()
-        self._remember_part()
+        if not self._shard_mode:
+            # 分片模式下每片已经是成品，不进「待拼接」清单
+            self._remember_part()
         try:
             await self._finish_session(blocking=True)
         except Exception as exc:  # noqa: BLE001
@@ -510,11 +517,11 @@ class RecordTask:
         fmt = cfg.save_format()
         split = cfg.split_enabled()
         split_time = cfg.split_seconds()
-        # 虎牙必须自己控制单段时长：签名到期/流卡住时一段可能录到十几分钟，
-        # 中间任何一次出错就是整段有问题。主动切段把风险压到「最多一段」。
+        # 虎牙：一个分片就是一个成品视频文件（ffmpeg 的 segment 直出，每片
+        # split_time 秒），录制全程一条连接不断；不再到点切段、也不在收尾拼接。
+        shard_mode = self.platform == "huya" and split
+        self._shard_mode = shard_mode
         self._chunk_max = 0.0
-        if self.platform == "huya":
-            self._chunk_max = float(min(split_time, 180) if split else 180)
         anchor = safe_name(self.anchor, self.platform)
         root = cfg.save_root()
         platform_label = PLATFORM_LABEL.get(self.platform, "其它")
@@ -530,14 +537,21 @@ class RecordTask:
         if self.title:
             title_part = safe_name(self.title, "")[:30]
             title_part = f"_{title_part}" if title_part else ""
-        prefix = f"{anchor}{title_part}_{stamp}"
+        if shard_mode and self._session_prefix:
+            # 分片模式下续段沿用同一套文件名，序号接着往下排，
+            # 否则每重连一次就换一个前缀，一场直播会散成好几堆分片。
+            prefix = self._session_prefix
+        else:
+            prefix = f"{anchor}{title_part}_{stamp}"
+            if shard_mode:
+                self._session_prefix = prefix
         self._files_prefix = prefix
         ext = {"ts": "ts", "mkv": "mkv", "flv": "flv", "mp4": "mp4",
                "mp3": "mp3", "m4a": "m4a"}.get(fmt, "ts")
         chunk_fmt = fmt
         if self.platform == "huya" and ext in ("ts", "mkv", "mp4"):
             # 虎牙原生就是 FLV，分段直接用 FLV 落盘最稳（-c copy 不必重打 TS），
-            # 等这场直播结束再拼接、按用户选的格式转一次。
+            # 分片就是成品；用户选了别的格式时只做一次转封装。
             ext = "flv"
             chunk_fmt = "flv"
         # 只保留一条线路：虎牙的多线路里大部分是 403 的死线路，其它平台给的第一条
@@ -545,11 +559,17 @@ class RecordTask:
         # 那样只会让卡片看起来一直在录、实际什么都没录进去。
         candidates: list[str] = [stream_url]
 
-        # 虎牙的「分段」由程序自己控制（到点切断、换新签名续录），不能让 ffmpeg
-        # 再按 -segment_time 切一遍：两套切法叠在一起，一段会碎成 _000/_001，
-        # 而收尾拼接收到的只有最后一个文件名，前面那些片段就被漏掉了。
-        # 用户要的「N 分钟一个文件」在整场收尾合并后再按分段时间切。
-        ffmpeg_split = split and self.platform != "huya"
+        # 虎牙开分段时让 ffmpeg 自己按 -segment_time 写分片（一片一个成品视频）；
+        # 不开分段时就是单文件，签到期/断流后重连再收尾拼接。
+        ffmpeg_split = split
+        seg_start = 0
+        seg_list = ""
+        if ffmpeg_split:
+            seg_list = os.path.join(out_dir, f"{prefix}_{stamp}.index.txt")
+            if shard_mode:
+                # 续段时序号从已有最大分片 +1 开始，不然新起的 ffmpeg 会从 000
+                # 重新编号，把上一段录好的分片覆盖掉。
+                seg_start = self._max_shard_index(out_dir, prefix) + 1
 
         def make_pattern(index: int) -> str:
             # 每条候选线路用独立文件名：否则后一条线路重开会把前一条已录的数据覆盖掉，
@@ -590,7 +610,8 @@ class RecordTask:
             out_pattern = make_pattern(index)
             self.current_file = os.path.basename(out_pattern.replace("%03d", "000"))
             cmd = self._build_cmd(target, out_pattern, chunk_fmt, ffmpeg_split, split_time,
-                                  allow_any_ext=bool(proxy))
+                                  allow_any_ext=bool(proxy), seg_start=seg_start,
+                                  seg_list=seg_list)
             try:
                 spawn_kwargs: dict[str, Any] = {}
                 if _NO_WINDOW_FLAGS:
@@ -615,11 +636,20 @@ class RecordTask:
             self._last_growth = time.time()
             self._first_byte_at = 0.0
             last_beat = time.time()
+            last_shard_check = 0.0
             pump = asyncio.create_task(self._pump())
             while True:
                 done, _ = await asyncio.wait({pump}, timeout=5)
                 if done:
                     break
+                if shard_mode and time.time() - last_shard_check >= 5:
+                    # 卡片上的「分段」= 已经落盘的分片数（每片就是一个成品视频）
+                    last_shard_check = time.time()
+                    count = len(self._shard_files(out_dir, self._session_prefix or prefix,
+                                                  min_size=1))
+                    if count and count != self.segments:
+                        self.segments = count
+                        self.push()
                 # 每分钟留一条「还活着」的日志：出问题时能一眼看出是录着不涨还是彻底没动。
                 if time.time() - last_beat >= 60 and self.size > 0:
                     last_beat = time.time()
@@ -698,7 +728,9 @@ class RecordTask:
             chunk_bytes = self.size - self._base_bytes
             # 这一段已经落盘（哪怕是被 CDN 掐断的），记下来供收尾时拼接
             if chunk_bytes > 0:
-                self._remember_part()
+                if not shard_mode:
+                    # 分片模式下每片本身就是成品文件，不进「待拼接」清单
+                    self._remember_part()
                 # 有数据的一段结束：已录时长累计进来（虎牙一场要续好几段，
                 # 不累计的话卡片上的时长每段都会归零），并把「连续无写入」清零。
                 self._elapsed_base = (getattr(self, "_elapsed_base", 0.0)
@@ -751,7 +783,7 @@ class RecordTask:
         下一轮开播就是新的一场，分段只在整场内有效；不在这里合并的话，
         这些分段会一直散在目录里，等下次停止时才拼，时间戳还对不上。
         """
-        if not self._parts:
+        if not self._parts and not self._shard_mode:
             return
         proc = self._proc
         if proc is not None and proc.returncode is None:
@@ -778,6 +810,95 @@ class RecordTask:
                     os.remove(path)
         except OSError:
             pass
+
+    def _shard_files(self, out_dir: str, prefix: str, min_size: int = 0) -> list[str]:
+        """分片模式下这场直播已经落盘的分片（按序号排序）。
+
+        用 os.stat 而不是 os.path.getsize：Windows 目录项里的文件大小是懒更新的，
+        刚写完的那一片可能还显示 0 字节，收尾时会把它当成「不存在」漏掉。
+        """
+        try:
+            names = os.listdir(out_dir)
+        except OSError:
+            return []
+        pat = re.compile(re.escape(prefix) + r"_(\d{3,})\.(?:flv|ts|mkv|mp4)$")
+        found: list[tuple[int, str]] = []
+        for name in names:
+            m = pat.match(name)
+            if not m:
+                continue
+            path = os.path.join(out_dir, name)
+            try:
+                size = os.stat(path).st_size
+            except OSError:
+                continue
+            if size <= min_size:
+                continue
+            found.append((int(m.group(1)), path))
+        found.sort()
+        return [p for _, p in found]
+
+    def _max_shard_index(self, out_dir: str, prefix: str) -> int:
+        best = -1
+        for path in self._shard_files(out_dir, prefix):
+            m = re.search(r"_(\d{3,})\.(?:flv|ts|mkv|mp4)$", path)
+            if m:
+                best = max(best, int(m.group(1)))
+        return best
+
+    def _finalize_shards(self, blocking: bool = False) -> None:
+        """分片模式收尾：分片本身就是成品，不拼接，只按需转封装。"""
+        prefix = self._session_prefix or self._files_prefix
+        out_dir = self.out_dir
+        if not prefix or not out_dir:
+            self._shard_mode = False
+            return
+        files = self._shard_files(out_dir, prefix)
+        self._session_prefix = ""
+        self._shard_mode = False
+        if not files:
+            return
+        # 0 字节的空片（刚起 ffmpeg 就被掐掉）直接删，别留在目录里碍事
+        kept: list[str] = []
+        for path in files:
+            try:
+                if os.stat(path).st_size <= 0:
+                    os.remove(path)
+                    continue
+            except OSError:
+                continue
+            kept.append(path)
+        files = kept
+        if not files:
+            return
+        target = self.cfg.save_format()
+        want = {"ts": "ts", "mkv": "mkv", "mp4": "mp4"}.get(target, "flv")
+        converts = [p for p in files if want != "flv" and not p.lower().endswith("." + want)]
+
+        def work() -> None:
+            # 停止时正写着的那一片没有结尾（ffmpeg 报 Duration: N/A），
+            # 重封装一遍补上时长，用户点开就能正常拖进度条。
+            for path in files:
+                dur = concat.probe_duration(path)
+                if dur <= 0:
+                    fixed = concat.repair_file(path, "flv")
+                    if fixed > 0:
+                        log("INFO", f"{os.path.basename(path)} 末尾被掐断，"
+                                    f"已修成可播放的 {fixed:.1f} 秒")
+            for path in converts:
+                try:
+                    concat.convert_session(path, target)
+                except Exception as exc:  # noqa: BLE001
+                    log("WARN", f"{self.anchor or self.url} 分片转封装失败："
+                                f"{os.path.basename(path)}：{exc}")
+
+        if converts or True:  # 即使不用转格式，也要把被掐断的末片修一遍
+            if blocking:
+                work()
+            else:
+                threading.Thread(target=work, daemon=True).start()
+        log("SUCCESS", f"{self.anchor or self.url} 分段录制结束，共 {len(files)} 个分片"
+                       f"（每片约 {int(self.cfg.split_seconds())} 秒）→ {out_dir}")
 
     def _remember_part(self) -> None:
         """把刚录完的那一段记下来，等这场直播结束统一拼接成一个文件。
@@ -840,6 +961,10 @@ class RecordTask:
         if (not force and not self._stop.is_set() and self._loop_task is not None
                 and not self._loop_task.done() and self.status == "recording"):
             log("INFO", f"{self.anchor or self.url} 录制中，分段先留着，等这一场结束再合并")
+            return
+        if self._shard_mode:
+            # 分片模式：每片本来就是成品视频，收尾只做（可选）转封装，不拼接。
+            self._finalize_shards(blocking=blocking)
             return
         parts = [p for p in self._parts if os.path.isfile(p)]
         metas = [m for m in getattr(self, "_part_meta", [])
@@ -980,7 +1105,8 @@ class RecordTask:
             pass
 
     def _build_cmd(self, stream_url: str, out_pattern: str, fmt: str,
-                   split: bool, split_time: int, allow_any_ext: bool = False) -> list[str]:
+                   split: bool, split_time: int, allow_any_ext: bool = False,
+                   seg_start: int = 0, seg_list: str = "") -> list[str]:
         cmd = [
             paths.ffmpeg_exe(), "-hide_banner", "-loglevel", "info", "-nostats",
             "-progress", "pipe:2", "-y",
@@ -1029,6 +1155,13 @@ class RecordTask:
             "-flush_packets", "1",
         ]
         seg = ["-f", "segment", "-segment_time", str(split_time), "-reset_timestamps", "1"]
+        if split and seg_start > 0:
+            # 续段时接着编号，不能从 000 重来（会覆盖已录好的分片）。
+            seg += ["-segment_start_number", str(seg_start)]
+        if split and seg_list:
+            # 用户要的「用个文本记录每个分片」：ffmpeg 边录边把分片名写进清单。
+            seg += ["-segment_list", seg_list, "-segment_list_type", "flat",
+                    "-segment_list_flags", "+live"]
         if fmt == "mp3":
             cmd += ["-map", "0:a", "-c:a", "libmp3lame", "-b:a", "192k"]
             cmd += seg + ["-segment_format", "mp3"] if split else ["-f", "mp3"]

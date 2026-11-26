@@ -325,6 +325,32 @@ def convert_session(path: str, target_fmt: str = "") -> None:
         log("SUCCESS", f"{label} 已转成 {detail}")
 
 
+def repair_file(path: str, container: str = "flv") -> float:
+    """修一个「被掐断」的分片：重封装一遍，让它带上正确的时长。
+
+    停止录制时正写着的那一片没有结尾、ffmpeg 报 `Duration: N/A`，
+    播放器能看到内容但要拖进度条就不行；重封装一次就能补上时长。
+    返回修好后的时长（拿不到返回 0）。
+    """
+    if not os.path.isfile(path):
+        return 0.0
+    tmp = path + ".fix"
+    fmt = _SEG_FORMAT.get(container, "flv")
+    code, _ = _run([
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        "-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt",
+        "-i", path, "-c", "copy", "-f", fmt, tmp,
+    ], timeout=600)
+    duration = probe_duration(tmp) if os.path.isfile(tmp) else 0.0
+    if duration > 0:
+        with contextlib.suppress(OSError):
+            os.replace(tmp, path)
+        return duration
+    with contextlib.suppress(OSError):
+        os.remove(tmp)
+    return 0.0
+
+
 def merge_session(parts: list[str], out: str, keep_parts: bool = False,
                   target_fmt: str = "",
                   inpoints: list[float] | None = None) -> tuple[bool, str]:

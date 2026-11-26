@@ -4,6 +4,10 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **虎牙分段录制改为「一片一个成品视频」**：开「分段录制」时不再由程序到点 terminate 切段、也不在收尾合并/再切 part，而是让 ffmpeg 的 segment 在一条不断线的 FLV 连接上直接写 `<名字>_000.flv`、`_001.flv`…，每片就是设置里的单段时长、可直接播放；同时用 `-segment_list … -segment_list_type flat -segment_list_flags +live` 落一个分片清单文本（<名字>_<时间>.index.txt）。续段时用 `-segment_start_number` 接着编号，不会覆盖已录分片；前缀在一场内保持稳定（`self._session_prefix`）。
+- 收尾新增 `liverec/concat.py::repair_file()`：停止/断流时正在写的那一片是 `Duration: N/A`（播放器拖不动进度条），重封装一遍补上时长，日志「末尾被掐断，已修成可播放的 X 秒」；0 字节空片直接删掉。
+- 修三个由此暴露的 bug：①`_shard_files()` 用 `os.path.getsize()` 会读到 Windows 懒更新的旧大小（末片被当成 0 字节漏掉）→ 改 `os.stat().st_size` + `min_size` 参数；②`_finalize_shards()` 的修复逻辑原来写在 `if converts:` 里，目标格式是 flv 时压根不跑 → 改为总是跑；③`stop()` 无条件 `_remember_part()`，会把分片误记成待拼接分段 → 分片模式跳过。
+- 实测（房 660000，分片 15/20 秒）：分片 `_000.._011` 连续落盘、录制不中断、续段后序号接着往下、清单文本实时增长、收尾末片 5.1 秒可播、`_merged` 无残留、卡片「分段」计数跟着涨。
 - **虎牙录制改用 FLV 长连接**（对齐 stream-rec 的 `flvFormatStreams()` 优先策略）：`liverec/huya.py::_candidates()` 排序改成 FLV 优先、HLS 兜底；`resolve()` 的 CDN 轮转只在**同一格式**内进行（以前混着轮转，下一段会从 FLV 跳回 HLS，接缝又变成重播 2 个分片）。HLS 仍保留本地中转 + inpoint 去重，作为没有 FLV 线路时的兜底。
 - 续段接缝改用「媒体时长 − 实际录制墙钟时长」估算重播量（FLV 重连时 CDN 从直播边缘往后落后几秒起推），比只看墙钟时间更准；超过 0.3 秒就记「与上一段重叠 X 秒，拼接时自动跳过」并在拼接时用 `inpoint` 精确跳过。
 - 实测（房 660000，`split_seconds=20` 强制切段）：4 段共 66.6 秒媒体 / 70 秒墙钟，无重复播放；连续录制 5 分钟 153.88 MB、卡片时长连续不归零。
