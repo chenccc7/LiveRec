@@ -83,8 +83,6 @@ class SettingsBody(BaseModel):
     checkInterval: int | None = None
     concurrent: int | None = None
     folderByAuthor: bool | None = None
-    proxyEnabled: bool | None = None
-    proxyAddr: str | None = None
     cookies: dict[str, str] | None = None
 
 
@@ -126,7 +124,7 @@ async def _cookie_audit() -> None:
             log("INFO", f"Cookie 启动校验 · {label}：未设置（游客模式）")
             continue
         try:
-            res = await cookie_check.check_cookie(platform, raw, cfg.proxy_for(platform))
+            res = await cookie_check.check_cookie(platform, raw, "")
         except Exception as exc:  # noqa: BLE001 - 校验失败不影响启动
             log("WARN", f"Cookie 启动校验 · {label}：检测失败 {type(exc).__name__}: {exc}")
             continue
@@ -285,7 +283,7 @@ async def api_preview(body: PreviewBody):
     platform = resolver.detect_platform(url)
     if platform == "unknown":
         return {"ok": False, "platform": platform, "error": "无法识别的平台链接"}
-    info = await resolver.resolve(url, cfg.quality(), cfg.cookie(platform), cfg.proxy_for(platform))
+    info = await resolver.resolve(url, cfg.quality(), cfg.cookie(platform), "")
     return {
         "ok": not info.get("error"),
         "platform": platform,
@@ -304,7 +302,7 @@ async def api_qualities(url: str = ""):
     if not link:
         return {"ok": False, "error": "缺少直播间链接"}
     platform = resolver.detect_platform(link)
-    result = await resolver.fetch_qualities(link, cfg.cookie(platform), cfg.proxy_for(platform))
+    result = await resolver.fetch_qualities(link, cfg.cookie(platform), "")
     if result.get("ok"):
         result["label"] = resolver.PLATFORMS.get(platform, {}).get("label", platform)
         log("INFO", f"{result['label']} 可选画质：" + "、".join(q["label"] for q in result["qualities"]))
@@ -459,7 +457,7 @@ async def api_cookie_check(body: CookieCheckBody):
         raw = cfg.cookie(platform)
     if "*" * 8 in raw:  # 前端把打码串回传了，说明用户没改过
         raw = cfg.cookie(platform)
-    result = await cookie_check.check_cookie(platform, raw, cfg.proxy_addr() if cfg.proxy_enabled() else "")
+    result = await cookie_check.check_cookie(platform, raw, "")
     label = result.get("label") or platform
     if result.get("state") == "login" or (result.get("state") == "likely" and platform in ("huya", "douyu")):
         log("SUCCESS", f"{label} Cookie 检测：{result.get('message')}")

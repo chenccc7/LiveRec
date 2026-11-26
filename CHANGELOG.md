@@ -4,6 +4,11 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **录制中胶囊改成「录制时长」**（用户指出上一版把方向做反了）：`web/app.js` 状态胶囊从「录制中 20:05:13」（开始时刻）改成「录制中 00:12:34」（计时器），按 `startedAt` 算、每秒刷新、与文件长短无关；开始时刻挪到胶囊的悬停提示里。空闲卡片那格恢复成「已录时长」。
+- **成品清单不再放进保存目录**：`liverec/recorder.py::_move_manifests()` 只搬 `<名字>_partNNN.shards.txt`（每批的分片清单，跟着成品走）；整场成品清单 `<名字>.index.txt` 与 ffmpeg 自己的 `*.index.txt` 都留在临时目录、收尾随目录一起删掉。
+- **删掉 IP 代理功能**：`web/index.html` 移除添加弹窗里「使用代理 IP」一行、`web/app.js` 移除对应的开关逻辑与设置弹窗里的「代理录制 / 代理地址」两栏、`liverec/config.py` 删除 `proxy_enabled()/proxy_addr()/proxy_for()` 与 ini 键「是否使用代理ip(是/否)」「代理地址」「使用代理录制的平台(逗号分隔)」，`liverec/server.py` / `liverec/recorder.py` 的调用点改成空串（`resolver` 里 `proxy=` 形参保留，默认空，永不传值）。
+- **删掉分段行旁的说明**：添加/编辑弹窗里「分段录制」旁边的「只对虎牙生效（几秒一片、攒够再合并）」去掉（分段录制与分片是两回事，写在那里容易误会）。
+
 - **分片清单移进临时目录、实时更新、每批一份**（用户反馈「`…index.txt` / `…shards.txt` 怎么没放在临时分片目录里；文本要实时更新；每个分片算总时长，到分段时长就合并并创建新的分片信息文本」）：
   - `liverec/recorder.py::_manifest()` 改成写 `<保存路径>\merge-tmp\<场次>\<名字>.index.txt`（成品清单）。
   - 新增 `_batch_path()` / `_batch_target()` / `_batch_reset()` / `_write_batch_manifest()`：每批分片用一份 `<名字>_partNNN.shards.txt`，录制循环每 5 秒把这一批的分片（文件名 / 大小 / 时长 + 「已累计 … / 目标 … 秒」）**整篇重写**，所以文本是实时的。

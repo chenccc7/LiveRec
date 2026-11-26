@@ -410,7 +410,6 @@ function roomView(r) {
     meterTotal: splitOn ? fmtMeter(segTotal) : '不分段',
     meterPct: splitOn ? Math.min(100, (segElapsed / segTotal) * 100) : 100,
     fileName: r.currentFile ? String(r.currentFile).split(/[\\/]/).pop() : '',
-    proxy: isOn(S.settings.proxyEnabled),
     unattended: r.unattended !== false,
     danmaku: r.danmaku !== false,
     qualityNote: r.qualityNote || '',
@@ -437,7 +436,7 @@ function renderCard(r0) {
   const idle = r.status === 'idle';
 
   const statusHtml = rec
-    ? `<span class="status recording" title="开始录制 ${r.startText}"><i class="dot"></i>录制中 <b data-f="start">${r.startText}</b></span>`
+    ? `<span class="status recording" title="开始录制 ${r.startText}｜已录 ${r.timerText}"><i class="dot"></i>录制中 <b data-f="timer">${r.timerText}</b></span>`
     : `<span class="status ${r.status}"><i class="dot"></i>${STATUS_TEXT[r.status] || r.status}</span>`;
 
   const tags = [
@@ -445,7 +444,6 @@ function renderCard(r0) {
     r.qualityNote
       ? `<span class="tag warn" title="${escapeHtml(r.qualityNote)}">${r.qualityActual || r.quality || '原画'}·降级</span>`
       : `<span class="tag">${r.quality || '原画'}</span>`,
-    r.proxy ? '<span class="tag proxy">代理</span>' : '',
     // 每张卡片各自的弹幕开关：关掉就是「只录视频、不录弹幕」
     `<button class="tag dm${r.danmaku ? ' on' : ''}" data-act="dm"
        title="${r.danmaku
@@ -496,7 +494,7 @@ function renderCard(r0) {
   } else {
     body = `
       <div class="stats">
-        <div class="stat"><div class="k">录制时长</div><div class="v" data-f="timer">${r.timerText}</div></div>
+        <div class="stat"><div class="k">已录时长</div><div class="v" data-f="elapsed">${r.elapsedText}</div></div>
         <div class="stat"><div class="k">文件大小</div><div class="v" data-f="size">${r.sizeText}</div></div>
         <div class="stat"><div class="k">分辨率</div><div class="v" data-f="res">${r.resText}</div></div>
       </div>
@@ -834,12 +832,10 @@ function setSwitch(sw, on) {
 }
 
 function syncModalToggles() {
-  const rows = optRows();
-  if (rows[0]) setSwitch($('.sw', rows[0]), !!S.settings.proxyEnabled);
-  // 分段录制那一行已经换成选择框（没有 .sw），弹幕开关是最后一个带开关的行
-  const switchRows = rows.filter(row => !!$('.sw', row));
+  // 分段录制那一行现在是选择框（没有 .sw），带开关的只剩弹幕那一行
+  const switchRows = optRows().filter(row => !!$('.sw', row));
   const dmRow = switchRows[switchRows.length - 1];
-  if (dmRow && dmRow !== rows[0]) setSwitch($('.sw', dmRow), !!S.pendingDanmaku);
+  if (dmRow) setSwitch($('.sw', dmRow), !!S.pendingDanmaku);
 }
 
 function segSelect() {
@@ -979,17 +975,7 @@ optRows().forEach((row, idx) => {
   sw.onclick = async () => {
     const on = !sw.classList.contains('on');
     setSwitch(sw, on);
-    if (idx === 0) {
-      S.settings.proxyEnabled = on;
-      try { await api('/api/settings', { method: 'POST', body: { proxyEnabled: on } }); }
-      catch (e) { pushLocalLog('ERROR', e.message); }
-    } else if (idx === 1) {
-      S.settings.splitEnabled = on;
-      try { await api('/api/settings', { method: 'POST', body: { splitEnabled: on } }); }
-      catch (e) { pushLocalLog('ERROR', e.message); }
-    } else {
-      S.pendingDanmaku = on;
-    }
+    S.pendingDanmaku = on;
   };
 });
 
@@ -1148,13 +1134,7 @@ function openSettings() {
           </select></label>
         <label class="fld"><span>单段时长（秒）</span>
           <input data-st="splitSeconds" type="number" min="60" step="60" value="${st.splitSeconds || 1800}"></label>
-        <label class="fld"><span>代理录制</span>
-          <select data-st="proxyEnabled">
-            <option value="1" ${st.proxyEnabled ? 'selected' : ''}>开启</option>
-            <option value="0" ${st.proxyEnabled ? '' : 'selected'}>关闭</option>
-          </select></label>
-        <label class="fld"><span>代理地址</span>
-          <input data-st="proxyAddr" value="${escapeHtml(st.proxyAddr || '')}" placeholder="http://127.0.0.1:7890" spellcheck="false"></label>
+
         ${cookieFields}
       </div>
       <div class="hint-line">四个平台的取流与弹幕都已内置（虎牙录制在本版重新实现：多 CDN × 双格式取线路 + WUP 兜底 token + 本地 HLS 中转续签）。「检测」只做验证、不会保存，保存请点右下角。</div>
@@ -1184,7 +1164,7 @@ function openSettings() {
       const key = el.dataset.st;
       let val = el.value;
       if (key === 'loopInterval' || key === 'concurrent' || key === 'splitSeconds' || key === 'checkInterval') val = Number(val);
-      else if (key === 'splitEnabled' || key === 'proxyEnabled') val = val === '1';
+      else if (key === 'splitEnabled') val = val === '1';
       body[key] = val;
     });
     const cookies = {};

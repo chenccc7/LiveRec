@@ -346,7 +346,7 @@ class RecordTask:
                         self.url,
                         self.quality,
                         cookie=cfg.cookie(self.platform),
-                        proxy=cfg.proxy_for(self.platform),
+                        proxy="",
                         probe=self.platform != "huya",
                     ),
                     timeout=75,
@@ -397,7 +397,7 @@ class RecordTask:
                     adj = await resolver.adjust_quality(
                         self.url, self.quality,
                         cookie=cfg.cookie(self.platform),
-                        proxy=cfg.proxy_for(self.platform),
+                        proxy="",
                     )
                 except Exception as exc:  # noqa: BLE001
                     log("WARN", f"{self.anchor or self.url} 画质校正失败（按原档位继续）：{exc}")
@@ -419,7 +419,7 @@ class RecordTask:
                         changed = await resolver.resolve(
                             self.url, effective,
                             cookie=cfg.cookie(self.platform),
-                            proxy=cfg.proxy_for(self.platform),
+                            proxy="",
                         )
                     except Exception as exc:  # noqa: BLE001
                         log("WARN", f"{self.anchor or self.url} 按「{effective}」重新解析失败：{exc}")
@@ -648,7 +648,7 @@ class RecordTask:
             # playlist 上的签名 query 导致分片 403，这里过一层本地中转把它改写绝对。
             proxy = _start_hls_proxy(candidate, self.platform, room_url=self.url,
                                      cookie=self.cfg.cookie(self.platform),
-                                     proxy_addr=self.cfg.proxy_for(self.platform))
+                                     proxy_addr="")
             target = proxy.local_url if proxy else candidate
             out_pattern = make_pattern(index)
             self.current_file = os.path.basename(out_pattern.replace("%03d", "000").replace("%04d", "0000"))
@@ -964,13 +964,11 @@ class RecordTask:
         if not tmp_dir or not self.out_dir or not os.path.isdir(tmp_dir):
             return
         prefix = self._session_prefix or self._files_prefix
-        tail = f"{prefix}.index.txt"
         moved = 0
         for name in sorted(os.listdir(tmp_dir)):
-            # 只搬我们自己写的两份清单；ffmpeg 自己写的 *.index.txt 是分片原始列表，
-            # 留在保存目录只会让用户看着乱，收尾时随临时目录一起删掉。
-            if name != tail and not (name.startswith(f"{prefix}_part")
-                                    and name.endswith(".shards.txt")):
+            # 只把「这一批分片清单」跟着成品搬进保存目录；
+            # 整场成品清单（<名字>.index.txt）和 ffmpeg 自己的分片原始列表都不搬，随临时目录删掉。
+            if not (name.startswith(f"{prefix}_part") and name.endswith(".shards.txt")):
                 continue
             with contextlib.suppress(OSError):
                 os.replace(os.path.join(tmp_dir, name),

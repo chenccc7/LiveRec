@@ -159,28 +159,9 @@ class Config:
         """把配置里的 ffmpeg 路径应用到 paths（启动时、保存设置后各调一次）。"""
         return self.ffmpeg_path()
 
-    def proxy_enabled(self) -> bool:
-        """代理开关：要求「是」且代理地址非空，避免空地址被当成开启。"""
-        if not self.get_bool(SEC_REC, "是否使用代理ip(是/否)", False):
-            return False
-        return bool(self.proxy_addr().strip())
-
-    def proxy_addr(self) -> str:
-        return self.raw(SEC_REC, "代理地址", "")
 
     def cookie(self, platform: str) -> str:
         return self.raw(SEC_COOKIE, COOKIE_KEYS.get(platform, ""), "")
-
-    def proxy_for(self, platform: str) -> str:
-        """返回该平台解析时该用的代理地址（空串表示不走代理）。"""
-        if not self.proxy_enabled():
-            return ""
-        use_list = self.raw(SEC_REC, "使用代理录制的平台(逗号分隔)", "")
-        if use_list:
-            names = [x.strip() for x in use_list.replace("，", ",").split(",") if x.strip()]
-            if platform not in names:
-                return ""
-        return self.proxy_addr()
 
     # ---------- 面向界面的快照 ----------
     def to_dict(self) -> dict[str, Any]:
@@ -195,8 +176,6 @@ class Config:
             "checkInterval": self.check_interval(),
             "concurrent": self.concurrent(),
             "folderByAuthor": self.folder_by_author(),
-            "proxyEnabled": self.proxy_enabled(),
-            "proxyAddr": self.proxy_addr(),
             "cookies": {p: self.cookie(p) for p in COOKIE_KEYS},
             "ffmpeg": paths.ffmpeg_exe(),
             "ffmpegPath": self.raw(SEC_REC, K_FFMPEG, "").strip(),
@@ -226,10 +205,6 @@ class Config:
             self.set(SEC_REC, "同一时间访问网络的线程数", int(data["concurrent"]))
         if "folderByAuthor" in data:
             self.set(SEC_REC, "保存文件夹是否以作者区分", "是" if data["folderByAuthor"] else "否")
-        if "proxyEnabled" in data:
-            self.set(SEC_REC, "是否使用代理ip(是/否)", "是" if data["proxyEnabled"] else "否")
-        if "proxyAddr" in data:
-            self.set(SEC_REC, "代理地址", str(data["proxyAddr"] or ""))
         cookies = data.get("cookies") or {}
         for platform, val in cookies.items():
             key = COOKIE_KEYS.get(platform)
