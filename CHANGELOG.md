@@ -4,6 +4,14 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **虎牙改回 HLS 引擎 + 分片先落临时目录、合并后才进保存目录**（用户要求「按虎牙原始几秒一片，用文本记录分片，分片先存临时文件，合并之后再放进保存路径」）：
+  - `liverec/huya.py::_candidates()` 排序改回 HLS 优先、FLV 直连兜底；`resolve()` 的 CDN 轮转仍只在同一格式内进行。
+  - 开「分段录制」时 ffmpeg 用 `-f segment -segment_time 4` 把 HLS 的几秒一片写进临时目录 `<保存路径>\merge-tmp\<场次名>\`（`.ts` 分片，TS 直接 concat 最稳），续段时用 `-segment_start_number` 接着编号、前缀跨续段稳定。
+  - 录制循环每 5 秒 `_flush_ready_shards()`：攒够「单段时长」就把一批分片合并成 `<名字>_partNNN`，先在临时目录出 TS，再按用户选的格式转一次封装，最后 `os.replace` 挪进保存目录并删掉已合并的分片；整场结束 `_finalize_shards()` 把剩下的并成最后一个文件、清空并删除临时目录。
+  - 保存目录留下两份清单：`<名字>.index.txt`（成品清单：序号 / 文件名 / 分片数 / 时长）与 `<名字>.shards.txt`（分片清单：文件名 / 大小，合并前就记进内存表，分片删掉后也能写全）。
+  - 顺带修：分片模式下不记「待拼接分段」（`_remember_part` 早退，不再出现「这一段没有生成文件」）；体积/8 秒无写入判定把临时目录也算进去（不再因为成品没落盘而误报）；续段不再把 `segments` 清零；合并加 `threading.Lock`，避免录制循环的定期 flush 和收尾线程同时合并同一批分片（以前会并出两个同名 part、文件被覆盖）。
+- 实测（房 660000，`split_seconds=20` / 15）：临时目录分片数持续增长、成品 `part000..part005` 依次落盘（每片 20 秒左右）、清单两份齐全、整场结束后临时目录被清空、录制不中断。
+- 旧版：「虎牙分段录制改为一片一个成品视频」（ffmpeg segment 直出、不断线）与「虎牙录制改用 FLV 长连接」已被上面的 HLS+临时目录方案取代，`repair_file()` / `inpoint` 去重等能力保留给没开分段录制时的收尾合并路径。
 - **虎牙分段录制改为「一片一个成品视频」**：开「分段录制」时不再由程序到点 terminate 切段、也不在收尾合并/再切 part，而是让 ffmpeg 的 segment 在一条不断线的 FLV 连接上直接写 `<名字>_000.flv`、`_001.flv`…，每片就是设置里的单段时长、可直接播放；同时用 `-segment_list … -segment_list_type flat -segment_list_flags +live` 落一个分片清单文本（<名字>_<时间>.index.txt）。续段时用 `-segment_start_number` 接着编号，不会覆盖已录分片；前缀在一场内保持稳定（`self._session_prefix`）。
 - 收尾新增 `liverec/concat.py::repair_file()`：停止/断流时正在写的那一片是 `Duration: N/A`（播放器拖不动进度条），重封装一遍补上时长，日志「末尾被掐断，已修成可播放的 X 秒」；0 字节空片直接删掉。
 - 修三个由此暴露的 bug：①`_shard_files()` 用 `os.path.getsize()` 会读到 Windows 懒更新的旧大小（末片被当成 0 字节漏掉）→ 改 `os.stat().st_size` + `min_size` 参数；②`_finalize_shards()` 的修复逻辑原来写在 `if converts:` 里，目标格式是 flv 时压根不跑 → 改为总是跑；③`stop()` 无条件 `_remember_part()`，会把分片误记成待拼接分段 → 分片模式跳过。
