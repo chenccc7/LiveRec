@@ -56,10 +56,14 @@ class StartBody(BaseModel):
     danmaku: bool = True
     anchor: str = ""
     start: bool = True
+    splitMode: str | None = None
+    splitSeconds: int | None = None
 
 
 class PatchBody(BaseModel):
     quality: str | None = None
+    splitMode: str | None = None
+    splitSeconds: int | None = None
     danmaku: bool | None = None
     enabled: bool | None = None
     anchor: str | None = None
@@ -310,7 +314,9 @@ async def api_qualities(url: str = ""):
 @app.post("/api/rooms")
 async def api_add_room(body: StartBody):
     try:
-        room = manager.add(body.url, body.quality, body.danmaku, body.anchor)
+        room = manager.add(body.url, body.quality, body.danmaku, body.anchor,
+                           split_mode=body.splitMode or "default",
+                           split_seconds=body.splitSeconds or 0)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.start:
@@ -324,6 +330,8 @@ async def api_patch_room(rid: str, body: PatchBody):
     before_url = str(before_meta.get("url") or "")
     before_quality = str(before_meta.get("quality") or "")
     before_danmaku = bool(before_meta.get("danmaku"))
+    before_split = (str(before_meta.get("splitMode") or "default"),
+                    int(before_meta.get("splitSeconds") or 0))
     payload = body.model_dump(exclude_none=True)
     unattended = payload.pop("unattended", None)
     try:
@@ -342,6 +350,11 @@ async def api_patch_room(rid: str, body: PatchBody):
     # 表现就是「改了画质但录出来还是原来那档」。
     quality_changed = body.quality is not None and str(body.quality) != before_quality
     danmaku_changed = body.danmaku is not None and bool(body.danmaku) != before_danmaku
+    # 分段策略改了也要重建任务，否则正在录的还是按旧的分段时长切
+    split_changed = (
+        (body.splitMode is not None and str(body.splitMode) != before_split[0])
+        or (body.splitSeconds is not None and int(body.splitSeconds) != before_split[1])
+    )
     if url_changed:
         # 地址变了：清掉旧主播名，重建任务，让新地址真正生效
         manager.meta[rid]["anchor"] = ""
@@ -349,7 +362,7 @@ async def api_patch_room(rid: str, body: PatchBody):
 
     task = manager.tasks.get(rid)
     was_running = bool(task is not None and getattr(task, "is_running", lambda: False)())
-    if (url_changed or quality_changed or danmaku_changed) and was_running:
+    if (url_changed or quality_changed or danmaku_changed or split_changed) and was_running:
         room = await manager.restart_room(rid)
     return {"ok": True, "room": room}
 

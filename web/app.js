@@ -78,6 +78,22 @@ function fmtDur(sec) {
   return `${pad2(Math.floor(s / 3600))}:${pad2(Math.floor((s % 3600) / 60))}:${pad2(s % 60)}`;
 }
 
+function fmtMeter(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  // 分段时长可能 ≥ 1 小时，必须把小时位带上，否则 3600 会被截成 00:00
+  return h > 0 ? `${h}:${pad2(m)}:${pad2(ss)}` : `${pad2(m)}:${pad2(ss)}`;
+}
+
+function fmtClock(ts) {
+  const n = Number(ts) || 0;
+  if (!n) return '—';
+  const d = new Date(n > 1e12 ? n : n * 1000);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 function fmtBytes(bytes) {
   const n = Number(bytes) || 0;
   if (n < 1024) return `${n} B`;
@@ -352,9 +368,21 @@ function escapeHtml(s) {
   ));
 }
 
-/* ── 卡片渲染 ──────────────────────────────────────── */function roomView(r) {
-  const splitOn = !!S.settings.splitEnabled;
-  const splitSecs = Number(S.settings.splitSeconds) || 1800;
+/* ── 卡片渲染 ──────────────────────────────────────── */
+function roomSplit(r) {
+  const mode = String(r.splitMode || 'default').toLowerCase();
+  if (mode === 'off') return { on: false, secs: 0 };
+  if (mode === 'custom') {
+    const secs = Number(r.splitSeconds) || Number(S.settings.splitSeconds) || 1800;
+    return { on: true, secs };
+  }
+  return { on: !!S.settings.splitEnabled, secs: Number(S.settings.splitSeconds) || 1800 };
+}
+
+function roomView(r) {
+  const sp = roomSplit(r);
+  const splitOn = sp.on;
+  const splitSecs = sp.secs || 1800;
   const elapsed = Number(r.elapsed) || 0;
   const segElapsed = splitOn ? elapsed % splitSecs : elapsed;
   const segTotal = splitOn ? splitSecs : 0;
@@ -362,12 +390,13 @@ function escapeHtml(s) {
     ...r,
     status: r.status === 'starting' ? 'waiting' : (r.status || 'idle'),
     elapsedText: fmtDur(elapsed),
+    startText: fmtClock(r.startedAt),
     sizeText: r.sizeText || fmtBytes(r.size || 0),
     bitrateText: r.bitrate || '—',
     resText: r.resolution || '—',
     segText: r.currentFile ? `${Math.max(1, r.segments || 1)} 段` : '—',
-    meterNow: fmtDur(segElapsed).slice(3),
-    meterTotal: splitOn ? fmtDur(segTotal).slice(3) : '不分段',
+    meterNow: fmtMeter(segElapsed),
+    meterTotal: splitOn ? fmtMeter(segTotal) : '不分段',
     meterPct: splitOn ? Math.min(100, (segElapsed / segTotal) * 100) : 100,
     fileName: r.currentFile ? String(r.currentFile).split(/[\\/]/).pop() : '',
     proxy: isOn(S.settings.proxyEnabled),
@@ -397,7 +426,7 @@ function renderCard(r0) {
   const idle = r.status === 'idle';
 
   const statusHtml = rec
-    ? `<span class="status recording"><i class="dot"></i>录制中 <b data-f="elapsed">${r.elapsedText}</b></span>`
+    ? `<span class="status recording" title="开始录制 ${r.startText}"><i class="dot"></i>录制中 <b data-f="start">${r.startText}</b></span>`
     : `<span class="status ${r.status}"><i class="dot"></i>${STATUS_TEXT[r.status] || r.status}</span>`;
 
   const tags = [
@@ -575,6 +604,7 @@ function patchRoom(snap) {
     const el = card.querySelector(sel);
     if (el && el.textContent !== String(val)) el.textContent = val;
   };
+  set('[data-f="start"]', view.startText);
   set('[data-f="elapsed"]', view.elapsedText);
   set('[data-f="size"]', view.sizeText);
   set('[data-f="bitrate"]', view.bitrateText);
@@ -795,8 +825,31 @@ function setSwitch(sw, on) {
 function syncModalToggles() {
   const rows = optRows();
   if (rows[0]) setSwitch($('.sw', rows[0]), !!S.settings.proxyEnabled);
-  if (rows[1]) setSwitch($('.sw', rows[1]), !!S.settings.splitEnabled);
-  if (rows[2]) setSwitch($('.sw', rows[2]), !!S.pendingDanmaku);
+  // 分段录制那一行已经换成选择框（没有 .sw），弹幕开关是最后一个带开关的行
+  const switchRows = rows.filter(row => !!$('.sw', row));
+  const dmRow = switchRows[switchRows.length - 1];
+  if (dmRow && dmRow !== rows[0]) setSwitch($('.sw', dmRow), !!S.pendingDanmaku);
+}
+
+function segSelect() {
+  return $('#mask .modal select[data-opt="split"]');
+}
+
+function segInputBox() {
+  return $('#mask .modal .seginp');
+}
+
+function syncSegInput(room) {
+  const sel = segSelect();
+  const box = segInputBox();
+  if (!sel || !box) return;
+  const custom = sel.value === 'custom';
+  box.style.display = custom ? '' : 'none';
+  const num = $('input', box);
+  if (!num) return;
+  const fallback = Number(S.settings.splitSeconds) || 1800;
+  const own = Number(room && room.splitSeconds) || 0;
+  num.value = custom ? (own || fallback) : '';
 }
 
 function openAdd(room) {
@@ -826,6 +879,9 @@ function openAdd(room) {
     if (footBtn) footBtn.textContent = '保存并开始';
   }
   if (selects[1] && S.settings.saveFormat) selects[1].value = S.settings.saveFormat;
+  const segSel = segSelect();
+  if (segSel) segSel.value = (room && room.splitMode) || 'default';
+  syncSegInput(room);
 
   syncModalToggles();
   setDetect(null);
@@ -901,6 +957,11 @@ $('#btn-close').onclick = closeMask;
 // 只允许右上角的 ✕ 关闭：点遮罩不再关闭（免得编辑到一半误触就把内容丢了），
 // 底部的「取消」按钮也随 index.html 一起去掉了。
 
+(() => {
+  const sel = segSelect();
+  if (sel) sel.addEventListener('change', () => syncSegInput(S.editing));
+})();
+
 optRows().forEach((row, idx) => {
   const sw = $('.sw', row);
   if (!sw) return;
@@ -934,6 +995,15 @@ if (saveBtn) {
     if (!url) { pushLocalLog('WARN', '请先粘贴直播间地址'); input.focus(); return; }
     const quality = selects[0] ? selects[0].value : '原画';
     const saveFormat = selects[1] ? selects[1].value : null;
+    const segSel = segSelect();
+    const splitMode = segSel ? segSel.value : 'default';
+    let splitSeconds = 0;
+    if (splitMode === 'custom') {
+      const box = segInputBox();
+      const num = box ? $('input', box) : null;
+      splitSeconds = Math.max(60, Math.round(Number(num && num.value)
+        || Number(S.settings.splitSeconds) || 1800));
+    }
 
     saveBtn.disabled = true;
     const oldText = saveBtn.textContent;
@@ -946,12 +1016,13 @@ if (saveBtn) {
       if (S.editing) {
         await api(`/api/rooms/${S.editing.id}`, {
           method: 'PATCH',
-          body: { url, quality, danmaku: S.pendingDanmaku }
+          body: { url, quality, danmaku: S.pendingDanmaku, splitMode, splitSeconds }
         });
       } else {
         await api('/api/rooms', {
           method: 'POST',
-          body: { url, quality, danmaku: S.pendingDanmaku, start: true, anchor: '' }
+          body: { url, quality, danmaku: S.pendingDanmaku, start: true, anchor: '',
+                  splitMode, splitSeconds }
         });
       }
       closeMask();

@@ -79,6 +79,8 @@ class Manager:
                 room["unattended"] = False
             # 无人值守是「每个直播间各自一份」：老版本没有这个字段时，沿用当时的全局开关
             room.setdefault("unattended", bool(self.unattended))
+            room.setdefault("splitMode", "default")
+            room.setdefault("splitSeconds", 0)
             room.setdefault("anchor", "")
             room.setdefault("title", "")
             if not str(room.get("anchor") or "").strip():
@@ -127,7 +129,8 @@ class Manager:
 
     # ---------- 房间 CRUD ----------
     def add(self, url: str, quality: str | None = None, danmaku: bool = True,
-            anchor: str = "") -> dict[str, Any]:
+            anchor: str = "", split_mode: str = "default",
+            split_seconds: int = 0) -> dict[str, Any]:
         url = (url or "").strip()
         if not url:
             raise ValueError("直播间地址不能为空")
@@ -154,6 +157,9 @@ class Manager:
             "anchor": (anchor or "").strip() or _fallback_name(url, platform),
             "title": "",
             "createdAt": int(time.time() * 1000),
+            # 分段策略：default=跟随全局配置，off=不分段，custom=自定义时长
+            "splitMode": (split_mode or "default").lower(),
+            "splitSeconds": max(0, int(split_seconds or 0)),
         }
         self.meta[rid] = room
         self._order.append(rid)
@@ -166,7 +172,8 @@ class Manager:
         room = self.meta.get(rid)
         if not room:
             raise KeyError(rid)
-        for key in ("quality", "danmaku", "enabled", "anchor", "url", "unattended"):
+        for key in ("quality", "danmaku", "enabled", "anchor", "url", "unattended",
+                    "splitMode", "splitSeconds"):
             if key in patch and patch[key] is not None:
                 room[key] = bool(patch[key]) if key == "unattended" else patch[key]
         task = self.tasks.get(rid)
@@ -175,6 +182,10 @@ class Manager:
                 task.quality = patch["quality"]
             if "danmaku" in patch:
                 task.danmaku_enabled = bool(patch["danmaku"])
+            if "splitMode" in patch and patch["splitMode"]:
+                task.split_mode = str(patch["splitMode"]).lower()
+            if "splitSeconds" in patch:
+                task.split_seconds_override = int(patch["splitSeconds"] or 0)
         self.save()
         self.broadcast({"type": "rooms"})
         return room
@@ -222,6 +233,8 @@ class Manager:
             self.cfg,
             on_update=lambda snap: self._on_update(rid, snap),
             danmaku=bool(room.get("danmaku", True)),
+            split_mode=str(room.get("splitMode") or "default"),
+            split_seconds=int(room.get("splitSeconds") or 0),
         )
         task.anchor = room.get("anchor") or ""
         task.danmaku_forward = self._on_danmaku
@@ -394,6 +407,8 @@ class Manager:
             snap["danmaku"] = bool(room.get("danmaku", True))
             snap["danmakuEnabled"] = bool(room.get("danmaku", True))
             snap["unattended"] = bool(room.get("unattended", bool(self.unattended)))
+            snap["splitMode"] = str(room.get("splitMode") or "default")
+            snap["splitSeconds"] = int(room.get("splitSeconds") or 0)
             # 画质以「正在跑的任务」为准：录制端开录前会按房间当前真实档位校正 quality，
             # 如果这里再用 meta 里的旧值覆盖回去，卡片显示的档位就会和实际录制的不一致。
             live_quality = snap.get("quality")

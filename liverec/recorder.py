@@ -81,7 +81,8 @@ class RecordTask:
     """一个直播间的完整状态与录制循环。"""
 
     def __init__(self, room_id: str, url: str, quality: str, cfg,
-                 on_update: Callable[[dict], None], danmaku: bool = True):
+                 on_update: Callable[[dict], None], danmaku: bool = True,
+                 split_mode: str = "default", split_seconds: int = 0):
         self.room_id = room_id
         self.url = url
         self.quality = quality
@@ -90,6 +91,11 @@ class RecordTask:
         self.cfg = cfg
         self.on_update = on_update
         self.danmaku_enabled = danmaku
+        # 每个房间可以各自决定分段策略：default=跟随全局配置，off=不分段，
+        # custom=用房间自己填的时长（最少 60 秒）
+        self.split_mode = (split_mode or "default").lower()
+        self.split_seconds_override = int(split_seconds or 0)
+        self._split_time = 0
 
         self.status = "idle"          # idle|waiting|recording|stopped|error
         self.anchor = ""
@@ -117,7 +123,7 @@ class RecordTask:
         self._part_seq = 0
         # 合并分片要串行：录制循环的定期 flush 和收尾线程可能同时跑
         self._shard_lock = threading.Lock()
-        self._shard_log: list[tuple[str, int]] = []
+        self._shard_log: list[tuple[str, int, float]] = []
         self._shard_dur: dict[str, float] = {}
         self.size = 0
         self.size_text = "0 B"
@@ -232,7 +238,7 @@ class RecordTask:
         self._tmp_dir = ""
         self._part_seq = 0
         self._shard_lock = threading.Lock()
-        self._shard_log: list[tuple[str, int]] = []
+        self._shard_log: list[tuple[str, int, float]] = []
         self._shard_dur = {}
         self.next_check_at = 0.0
         # 弹幕状态也得跟着清零：否则新一场的计数会从上一场的数字开始跳，
@@ -521,14 +527,25 @@ class RecordTask:
         self.push(force=True)
         log("ERROR", f"{self.anchor or self.url} 解析失败：{self.error}")
 
+    def _split_config(self) -> tuple[bool, int]:
+        """房间级分段策略：default 跟随全局，off 不分段，custom 用房间自填时长。"""
+        cfg = self.cfg
+        mode = (getattr(self, "split_mode", "default") or "default").lower()
+        if mode == "off":
+            return False, cfg.split_seconds()
+        if mode == "custom":
+            secs = int(getattr(self, "split_seconds_override", 0) or 0) or cfg.split_seconds()
+            return True, max(60, min(secs, 12 * 3600))
+        return cfg.split_enabled(), cfg.split_seconds()
+
     # ---------- 单次录制 ----------
     async def _record_once(self, stream_url: str, lines: list[str] | None = None) -> None:
         cfg = self.cfg
         self._no_data = False
         self._no_data_streak = 0
         fmt = cfg.save_format()
-        split = cfg.split_enabled()
-        split_time = cfg.split_seconds()
+        split, split_time = self._split_config()
+        self._split_time = split_time
         # 虎牙：走 HLS（几秒一个的传输分片），ffmpeg 用小 segment 落成临时分片，
         # 攒够「单段时长」就合并成一个文件放进保存目录；录制全程不断线。
         shard_mode = self.platform == "huya" and split
@@ -583,13 +600,14 @@ class RecordTask:
 
         # 虎牙开分段时：分片写进临时目录（每片几秒），攒够 split_time 再合并；
         # 不开分段时就是单文件，签到期/断流后重连再收尾拼接。
+        # 分片直出（临时目录 + 分片清单）只对虎牙生效；其它平台保持原来的行为：
+        # ffmpeg 直接按分段时长把成品切到保存目录，不写清单、不经过临时目录。
         ffmpeg_split = split
         seg_start = 0
         seg_list = ""
-        if ffmpeg_split:
-            base_dir = self._tmp_dir or out_dir
-            seg_list = os.path.join(base_dir, f"{prefix}_{stamp}.index.txt")
-            if shard_mode:
+        if shard_mode:
+            seg_list = os.path.join(self._tmp_dir, f"{prefix}_{stamp}.index.txt")
+            if True:
                 # 续段时序号从已有最大分片 +1 开始，不然新起的 ffmpeg 会从 000
                 # 重新编号，把上一段录好的分片覆盖掉。
                 seg_start = self._max_shard_index(self._tmp_dir, prefix) + 1
@@ -798,6 +816,8 @@ class RecordTask:
             self.status = "error"
             self.error = tail[:300]
             log("ERROR", f"{anchor} 录制中断：{self.error}")
+        elif self._shard_mode:
+            log("INFO", f"{anchor} 这一段结束（{_fmt_size(self.size)}，分片继续攒，攒够时长再合并）")
         else:
             log("INFO", f"{anchor} 本次录制结束（{_fmt_size(self.size)}，{self.segments or 1} 个文件）")
         self.push(force=True)
@@ -940,7 +960,7 @@ class RecordTask:
             ready = [p for p in ready if now - os.stat(p).st_mtime > 1.5]
         if not ready:
             return
-        target = float(self.cfg.split_seconds() or 600)
+        target = float(self._split_time or self.cfg.split_seconds() or 600)
 
         # 从最早的开始攒，攒够一段就合并一次（一次循环里可能并出好几个文件）
         while ready:
@@ -966,7 +986,8 @@ class RecordTask:
             for path in group:
                 try:
                     self._shard_log.append((os.path.basename(path),
-                                            os.stat(path).st_size))
+                                            os.stat(path).st_size,
+                                            self._shard_duration(path)))
                 except OSError:
                     pass
                 with contextlib.suppress(OSError):
@@ -1016,8 +1037,16 @@ class RecordTask:
         if not tmp_dir or not os.path.isdir(tmp_dir):
             return
         lines: list[str] = []
-        for name, size in getattr(self, "_shard_log", []):
-            lines.append(f"{name}\t{_fmt_size(size)}")
+        seen: set[str] = set()
+        total_secs = 0.0
+        total_bytes = 0
+        for item in getattr(self, "_shard_log", []):
+            name, size = item[0], item[1]
+            dur = float(item[2]) if len(item) > 2 else 0.0
+            total_secs += dur
+            total_bytes += int(size or 0)
+            seen.add(name)
+            lines.append(f"{name}\t{_fmt_size(size)}\t{dur:.1f} 秒")
         for name in sorted(os.listdir(tmp_dir)):
             if not name.endswith(".index.txt"):
                 continue
@@ -1031,7 +1060,12 @@ class RecordTask:
                         size = ""
                         with contextlib.suppress(OSError):
                             size = _fmt_size(os.stat(item).st_size)
-                        lines.append(f"{os.path.basename(item)}\t{size}")
+                        dur = self._shard_dur.get(item, 0.0)
+                        base = os.path.basename(item)
+                        if base in seen:
+                            continue
+                        seen.add(base)
+                        lines.append(f"{base}\t{size or '—'}\t{dur:.1f} 秒")
             except OSError:
                 continue
         if not lines:
@@ -1039,8 +1073,11 @@ class RecordTask:
         path = os.path.join(self.out_dir, f"{prefix}.shards.txt")
         try:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(f"# {self.anchor or self.url} 分片清单（每行一个分片：文件名\t大小）\n")
+                f.write(f"# {self.anchor or self.url} 分片清单"
+                        f"（每行一个分片：文件名\t大小\t时长）\n")
                 f.write("\n".join(lines) + "\n")
+                f.write(f"# 合计 {len(lines)} 个分片\t{_fmt_size(total_bytes)}"
+                        f"\t{total_secs:.1f} 秒（{total_secs / 3600:.2f} 小时）\n")
         except OSError:
             return
         log("INFO", f"{self.anchor or self.url} 分片清单已保存："
@@ -1073,7 +1110,7 @@ class RecordTask:
             except OSError:
                 pass
             log("SUCCESS", f"{self.anchor or self.url} 分段录制结束，共 {self._part_seq} 个文件"
-                           f"（每个约 {int(self.cfg.split_seconds())} 秒）→ {out_dir}")
+                           f"（每个约 {int(self._split_time or self.cfg.split_seconds())} 秒）→ {out_dir}")
 
         if blocking:
             work()

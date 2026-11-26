@@ -330,6 +330,11 @@
   .lrow .msg { color: #a9b5c8; flex: 1 1 auto; min-width: 0; word-break: break-all; }
 
   .foot { margin-top: 16px; font-size: 11px; color: #4a5468; display: flex; gap: 14px; }
+  .modal .note { font-size: 11.5px; color: #6b7688; line-height: 1.5; margin-bottom: 5px; }
+  .note.fmtnote { margin: 2px 0 6px; }
+  .optrow.segrow .sel { min-width: 180px; }
+  .optrow.seginp input { width: 120px; background: #131a26; border: 1px solid #232d3d;
+    border-radius: 8px; color: #e9eef8; padding: 5px 8px; font-size: 12.5px; }
 </style>
 </head>
 <body>
@@ -430,6 +435,7 @@
         <span class="ok"><i></i>已取到直播流</span>
       </div>
 
+      <div class="note fmtnote">保存格式 = 最终成品的封装格式，不代表录制时的原始格式（虎牙原始是 FLV/TS 流）</div>
       <div class="row2">
         <div class="fld">
           <label>录制画质</label>
@@ -452,10 +458,22 @@
         <span>使用代理 IP</span>
         <span class="desc">抖音 / TikTok 取流失败时打开</span>
       </div>
-      <div class="optrow">
-        <div class="sw on"><i></i></div>
+      <div class="optrow segrow">
         <span>分段录制</span>
-        <span class="desc">每 1800 秒切一段，避免单文件过大</span>
+        <div class="sel">
+          <select data-opt="split">
+            <option value="default">默认（跟随全局配置）</option>
+            <option value="off">不分段</option>
+            <option value="custom">自定义分段时长</option>
+          </select>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 9.5l6 6 6-6"/></svg>
+        </div>
+        <span class="desc">只对虎牙生效（几秒一片、攒够再合并）</span>
+      </div>
+      <div class="optrow seginp" style="display:none">
+        <span>分段时长</span>
+        <input type="number" min="60" step="60" placeholder="秒，例如 1800">
+        <span class="desc">最少 60 秒</span>
       </div>
       <div class="optrow">
         <div class="sw on"><i></i></div>
