@@ -4,6 +4,10 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **虎牙录制改用 FLV 长连接**（对齐 stream-rec 的 `flvFormatStreams()` 优先策略）：`liverec/huya.py::_candidates()` 排序改成 FLV 优先、HLS 兜底；`resolve()` 的 CDN 轮转只在**同一格式**内进行（以前混着轮转，下一段会从 FLV 跳回 HLS，接缝又变成重播 2 个分片）。HLS 仍保留本地中转 + inpoint 去重，作为没有 FLV 线路时的兜底。
+- 续段接缝改用「媒体时长 − 实际录制墙钟时长」估算重播量（FLV 重连时 CDN 从直播边缘往后落后几秒起推），比只看墙钟时间更准；超过 0.3 秒就记「与上一段重叠 X 秒，拼接时自动跳过」并在拼接时用 `inpoint` 精确跳过。
+- 实测（房 660000，`split_seconds=20` 强制切段）：4 段共 66.6 秒媒体 / 70 秒墙钟，无重复播放；连续录制 5 分钟 153.88 MB、卡片时长连续不归零。
+
 - 虎牙录制按 stream-rec 的做法整体重写（liverec/huya.py）：mp.huya.com 取房间信息（iPhone 微信 UA）、CDN × {flv,hls} × 码率线路矩阵、antiCode 本地重算（codec=264、u 旋转、ss）、WUP liveup.getCdnTokenInfo 兜底、udblgn Cookie 校验；录制改走本地 HLS 中转（每次刷新重签、分片过期即续段、收尾自动拼接）。
 - DISABLED_PLATFORMS 清空，虎牙重新可用；界面/README 里「虎牙已下线」的文案恢复。
 - liverec/hlsproxy.py：拉流转 erify=False（虎牙 CDN 证书链不完整）、非 URL 行与坏 URI 不再让整篇播放列表 500。

@@ -8,6 +8,8 @@
    **首档码率取 `liveData.bitRate`**（首项的 iBitRate 常是 0），
    再把 `sFlvAntiCode` 里 `exsphd` 携带的额外档位（HDR/杜比）合并进来；名字带 HDR 的档位跳过。
 3. 线路：`stream.baseSteamInfoList` 里每个 CDN 都拼 flv + hls 两套地址，
+   **录制默认取 FLV 长连接**（和 stream-rec 的 `flvFormatStreams()` 优先一致），
+   HLS 只在没有 FLV 线路时兜底；
    antiCode 自己算：
        u        = ((uid << 8) | (uid >> 24)) & 0xFFFFFFFF
        seqid    = int((int(wsTime, 16) + rand()) * 1000) + uid
@@ -432,7 +434,11 @@ def _candidates(data: dict[str, Any], wanted: str, cookie: str = "",
                 "quality": str((picked or {}).get("name") or wanted),
                 "max_bitrate": max_bitrate,
             })
-    result.sort(key=lambda c: (-int(c.get("priority") or 0), 0 if c.get("format") == "hls" else 1))
+    # 虎牙录制走 FLV 长连接（跟 stream-rec 一样）：FLV 是「服务器推什么就收什么」，
+    # 续段重连只会漏一小段、不会重播；HLS 有播放列表起点（默认 -3 个分片），
+    # 每次换地址都会把刚录过的内容再播一遍，拼接就得靠 inpoint 去重。
+    # 所以 FLV 排前面，HLS 只在没有 FLV 线路时兜底。
+    result.sort(key=lambda c: (-int(c.get("priority") or 0), 0 if c.get("format") == "flv" else 1))
     return result
 
 
@@ -618,9 +624,13 @@ def resolve(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "
     if not candidates:
         raise ResolveError("虎牙没有返回可用的直播线路（接口可能被风控，稍后再试）")
 
-    # 候选轮转：同一个房间连续取流时，每次换一条线路试，避免老撞在同一个 CDN 上
-    index = _PREFERRED.get(room, 0) % len(candidates)
-    ordered = candidates[index:] + candidates[:index]
+    # 候选轮转：同一个房间连续取流时，每次换一条线路试，避免老撞在同一个 CDN 上。
+    # 只在「同一个格式」里轮转：FLV 与 HLS 混着换的话，下一段就会从 FLV 跳回 HLS，
+    # 接缝又变成「重播 2 个分片」。格式由 _candidates 排好序（FLV 优先），这里跟随它。
+    same_fmt = [c for c in candidates if c.get("format") == candidates[0].get("format")]
+    other_fmt = [c for c in candidates if c.get("format") != candidates[0].get("format")]
+    index = _PREFERRED.get(room, 0) % len(same_fmt)
+    ordered = same_fmt[index:] + same_fmt[:index] + other_fmt
 
     # 挑一条真的能拉起来：先试前 3 条，全死就走 WUP 要服务端 antiCode（stream-rec 的 getTrueUrl）
     chosen = ordered[0]
@@ -640,7 +650,7 @@ def resolve(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "
             token_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
             if _alive(token_url, cookie, proxy):
                 chosen = dict(chosen, url=token_url)
-    _PREFERRED[room] = (index + 1) % len(candidates)
+    _PREFERRED[room] = (index + 1) % len(same_fmt)
 
     # 记住 antiCode 相关材料，resign() 可以据此重新算一次签名
     _ANTI_CACHE[chosen["url"]] = {

@@ -811,10 +811,15 @@ class RecordTask:
         if path in self._parts:
             return
         self._parts.append(path)
+        try:
+            media_dur = concat.probe_duration(path)
+        except Exception:  # noqa: BLE001
+            media_dur = 0.0
         self._part_meta.append({
             "path": path,
             "start": self._first_byte_at or time.time(),
             "end": time.time(),
+            "dur": media_dur,
         })
         log("INFO", f"{self.anchor or self.url} 记下第 {len(self._parts)} 个分段 "
                     f"（{_fmt_size(size)}）：{os.path.basename(path)}")
@@ -891,32 +896,42 @@ class RecordTask:
     def _overlaps(parts: list[str], metas: list[dict]) -> list[float]:
         """算出每一段开头有多少秒是上一段已经录过的（续段重播）。
 
-        第 i 段真实开始写数据的时刻，和第 i-1 段收尾时刻重叠的那段时间，
-        两段录的是同一段直播内容 —— 拼接时把第 i 段开头这段跳过即可，
-        否则拼出来就是「播几秒、退回几秒重播」。
+        两种判据取较大者：
+        1. 墙钟：第 i 段开始写数据的时刻，比第 i-1 段收尾时刻还早 → 时间上重叠。
+        2. 媒体时长：这一段的文件时长 比 它的实际录制墙钟时长 长的部分。
+           FLV 重连时 CDN 会从「比直播边缘落后几秒」的位置起推（要等它追上边缘），
+           这几秒正是上一段已经录过的内容；追上来之后是 1 倍速，所以
+           「媒体时长 − 墙钟时长」就是重播掉的那几秒。中途卡过的话该项为 0，不会误伤。
         """
         points: list[float] = []
         for index, part in enumerate(parts):
             skip = 0.0
             if index > 0 and len(metas) == len(parts):
+                meta = metas[index]
                 prev_end = float(metas[index - 1].get("end") or 0.0)
-                cur_start = float(metas[index].get("start") or 0.0)
+                cur_start = float(meta.get("start") or 0.0)
                 if prev_end and cur_start and cur_start < prev_end:
                     skip = prev_end - cur_start
-                    # 兜底：重叠不可能超过这一段自己的长度
-                    try:
-                        dur = concat.probe_duration(part)
-                    except Exception:  # noqa: BLE001
-                        dur = 0.0
-                    if dur > 0:
-                        skip = min(skip, dur * 0.9)
-                    else:
-                        skip = min(skip, 120.0)
-                    if skip > 0.3:
-                        log("INFO", f"{os.path.basename(part)} 与上一段重叠 "
-                                    f"{skip:.1f} 秒，拼接时自动跳过")
-                    else:
-                        skip = 0.0
+                media = float(meta.get("dur") or 0.0)
+                if media > 0:
+                    wall = max(0.0, float(meta.get("end") or 0.0) - cur_start)
+                    lag = media - wall if wall > 0 else 0.0
+                    if lag > skip:
+                        skip = lag
+                # 兜底：重叠不可能超过这一段自己的长度
+                try:
+                    dur = concat.probe_duration(part)
+                except Exception:  # noqa: BLE001
+                    dur = 0.0
+                if dur > 0:
+                    skip = min(skip, dur * 0.9)
+                else:
+                    skip = min(skip, 120.0)
+                if skip > 0.3:
+                    log("INFO", f"{os.path.basename(part)} 与上一段重叠 "
+                                f"{skip:.1f} 秒，拼接时自动跳过")
+                else:
+                    skip = 0.0
             points.append(round(skip, 3))
         return points
 
