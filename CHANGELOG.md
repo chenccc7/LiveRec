@@ -4,6 +4,8 @@
 
 ## 未发布（待确认后再定版本号/tag）
 
+- **单文件 exe 的解压目录改到程序目录下**：`LiveRec.spec` 加 `runtime_tmpdir="runtime"`，`run.py` 新增 `_prepare_frozen_runtime()`——启动时把工作目录切到 exe 所在目录、清掉上次异常退出残留的 `_MEIxxxx`、并在日志里记一行「解压目录：…」。效果：内置 ffmpeg 解压到 `<程序目录>\runtime\_MEIxxxx\bin\ffmpeg.exe`，不再写 `%TEMP%`；`data\`、`downloads\` 等相对路径也统一落在程序目录下。注意 `runtime_tmpdir` 是相对**启动时的当前目录**解析的，双击程序目录里的 exe 即在旁边；从别处启动会落到别处并记一条 WARN。
+
 - **录制中胶囊改成「录制时长」**（用户指出上一版把方向做反了）：`web/app.js` 状态胶囊从「录制中 20:05:13」（开始时刻）改成「录制中 00:12:34」（计时器），按 `startedAt` 算、每秒刷新、与文件长短无关；开始时刻挪到胶囊的悬停提示里。空闲卡片那格恢复成「已录时长」。
 - **成品清单不再放进保存目录**：`liverec/recorder.py::_move_manifests()` 只搬 `<名字>_partNNN.shards.txt`（每批的分片清单，跟着成品走）；整场成品清单 `<名字>.index.txt` 与 ffmpeg 自己的 `*.index.txt` 都留在临时目录、收尾随目录一起删掉。
 - **删掉 IP 代理功能**：`web/index.html` 移除添加弹窗里「使用代理 IP」一行、`web/app.js` 移除对应的开关逻辑与设置弹窗里的「代理录制 / 代理地址」两栏、`liverec/config.py` 删除 `proxy_enabled()/proxy_addr()/proxy_for()` 与 ini 键「是否使用代理ip(是/否)」「代理地址」「使用代理录制的平台(逗号分隔)」，`liverec/server.py` / `liverec/recorder.py` 的调用点改成空串（`resolver` 里 `proxy=` 形参保留，默认空，永不传值）。

@@ -96,4 +96,6 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
+    # 解压目录：相对路径，按启动时的当前目录解析；run.py 会先 chdir 到 exe 目录
+    runtime_tmpdir="runtime",
 )

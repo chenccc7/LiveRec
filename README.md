@@ -175,7 +175,7 @@ data/
 
 ## 设置项
 
-界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 `bin/ffmpeg.exe`）**、循环检测间隔（秒）、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
+界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 ffmpeg，解压在程序目录下的 `runtime\`）**、循环检测间隔（秒）、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
 
 ![全局设置：保存路径 / 弹幕路径 / ffmpeg 路径 / 检测间隔 / 四平台 Cookie](docs/screenshot-settings.png)
 
@@ -234,3 +234,11 @@ python -m PyInstaller --noconfirm LiveRec.spec     # 产物 dist/LiveRec.exe（�
 ```
 
 `LiveRec.spec` 已内嵌：`web/` 前端、`core/config` 默认配置模板、`core/src`（虎牙/斗鱼等平台的兜底解析实现）、`bin/ffmpeg.exe`、托盘图标 `bin/liverec.ico`、抖音弹幕签名脚本 `liverec/danmaku/assets/sign.js` 与 `py-mini-racer` 的 V8 运行时。抖音、B站、虎牙、斗鱼都走程序内置实现，运行期不需要 Node.js 或 `execjs`。
+
+### 关于 `runtime\` 目录
+
+单文件 exe 每次启动都要把内置的 ffmpeg 等资源解压出来用。现在**解压到程序自己所在目录下的 `runtime\`**（例如 `dist\runtime\_MEIxxxxxx\`），不再写系统临时目录 `%TEMP%`：
+
+- 程序退出时会自动删掉这次的 `_MEIxxxxxx`；如果崩溃或被强杀留下了残留，下次启动会自动清理（只留当前这一次的）；
+- 所以启动前请保证程序所在目录**可写**（放在 `C:\Program Files` 里会失败，放到任意普通目录即可）；
+- 解压目录是按**启动时的当前目录 + `runtime`** 算的，正常双击程序目录里的 `LiveRec.exe` 就落在旁边；如果从别的目录命令行启动，可能落到那个目录下，启动日志里会有一行「解压目录：…」或警告提示。想固定的话，把快捷方式的「起始位置」设成程序目录。
