@@ -1146,8 +1146,6 @@ function openSettings() {
           <label class="fld ckfld" style="grid-column:1/-1"><span>ffmpeg 路径（留空 = 用内置的）</span>
           <input data-st="ffmpegPath" value="${escapeHtml(st.ffmpegPath || '')}" placeholder="${escapeHtml(st.ffmpeg || 'bin\\ffmpeg.exe')}" spellcheck="false">
           <em class="ckout" style="color:#7b8698" title="${escapeHtml(st.ffmpeg || '')}">当前生效：${escapeHtml(st.ffmpeg || '未找到')}</em></label>
-        <label class="fld"><span>循环检测间隔（秒）</span>
-          <input data-st="loopInterval" type="number" min="10" value="${st.loopInterval || 300}"></label>
         <label class="fld"><span>开播检测间隔（无人值守，秒）</span>
           <input data-st="checkInterval" type="number" min="20" max="3600" value="${st.checkInterval || 60}"></label>
         <label class="fld"><span>同时解析线程数</span>
@@ -1188,7 +1186,7 @@ function openSettings() {
     $$('[data-st]', wrap).forEach(el => {
       const key = el.dataset.st;
       let val = el.value;
-      if (key === 'loopInterval' || key === 'concurrent' || key === 'splitSeconds' || key === 'checkInterval') val = Number(val);
+      if (key === 'concurrent' || key === 'splitSeconds' || key === 'checkInterval') val = Number(val);
       else if (key === 'splitEnabled') val = val === '1';
       body[key] = val;
     });

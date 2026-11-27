@@ -175,7 +175,7 @@ data/
 
 ## 设置项
 
-界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 ffmpeg，位于 `_internal\bin\ffmpeg.exe`）**、循环检测间隔（秒）、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
+界面右上角齿轮打开「全局设置」，写回 `data/config/config.ini`：默认画质、保存格式（ts/mkv/flv/mp4/mp3/m4a）、保存路径、**弹幕保存路径（留空 = 跟随每场录像目录下的 `danmaku/`）**、**ffmpeg 路径（留空 = 用程序内置的 ffmpeg，位于 `_internal\bin\ffmpeg.exe`）**、开播检测间隔（无人值守，秒，默认 60）、并发解析线程数、分段录制与单段时长（秒）、四个平台的 cookie（打码显示，留空不覆盖）。设置弹窗与「添加/编辑直播间」弹窗都只能用右上角的 ✕ 关闭。
 
 ![全局设置：保存路径 / 弹幕路径 / ffmpeg 路径 / 检测间隔 / 四平台 Cookie](docs/screenshot-settings.png)
 

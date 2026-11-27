@@ -79,7 +79,6 @@ class SettingsBody(BaseModel):
     ffmpegPath: str | None = None
     splitEnabled: bool | None = None
     splitSeconds: int | None = None
-    loopInterval: int | None = None
     checkInterval: int | None = None
     concurrent: int | None = None
     folderByAuthor: bool | None = None

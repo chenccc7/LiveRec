@@ -121,9 +121,6 @@ class Config:
     def split_seconds(self) -> int:
         return max(60, self.get_int(SEC_REC, "视频分段时间(秒)", 1800))
 
-    def loop_interval(self) -> int:
-        return max(10, self.get_int(SEC_REC, "循环时间(秒)", 300))
-
     def check_interval(self) -> int:
         """无人值守时的开播检测间隔（秒），默认 60。"""
         return max(20, min(3600, self.get_int(SEC_REC, "开播检测间隔(秒)", 60)))
@@ -234,8 +231,7 @@ class Config:
             "danmakuRoot": self.danmaku_root(),
             "splitEnabled": self.split_enabled(),
             "splitSeconds": self.split_seconds(),
-            "loopInterval": self.loop_interval(),
-            "checkInterval": self.check_interval(),
+                "checkInterval": self.check_interval(),
             "concurrent": self.concurrent(),
             "folderByAuthor": self.folder_by_author(),
             "cookies": {p: self.cookie(p) for p in COOKIE_KEYS},
@@ -259,8 +255,6 @@ class Config:
             self.set(SEC_REC, "分段录制是否开启", "是" if data["splitEnabled"] else "否")
         if "splitSeconds" in data:
             self.set(SEC_REC, "视频分段时间(秒)", int(data["splitSeconds"]))
-        if "loopInterval" in data:
-            self.set(SEC_REC, "循环时间(秒)", int(data["loopInterval"]))
         if "checkInterval" in data and data["checkInterval"]:
             self.set(SEC_REC, "开播检测间隔(秒)", int(data["checkInterval"]))
         if "concurrent" in data:
