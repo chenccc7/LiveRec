@@ -609,35 +609,7 @@ function renderAll() {
     return;
   }
   grid.innerHTML = S.rooms.map(renderCard).join('');
-  fitGridHeight();
 }
-
-// 卡片区固定成「两行卡片」的高度：量出前两行里最高的卡片，加上行间距。
-// 卡片高度是变的（录制中的比待机的高），所以每次重排都重新量一次。
-function fitGridHeight() {
-  const grid = $('#grid');
-  if (!grid) return;
-  const cards = [...grid.querySelectorAll('.card')];
-  if (!cards.length) { grid.style.removeProperty('--grid-h'); return; }
-  const rows = new Map();
-  cards.forEach(c => {
-    const top = Math.round(c.getBoundingClientRect().top);
-    rows.set(top, Math.max(rows.get(top) || 0, c.offsetHeight));
-  });
-  const heights = [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, h]) => h);
-  const gap = parseFloat(getComputedStyle(grid).rowGap) || 16;
-  const two = heights.length >= 2
-    ? heights[0] + heights[1] + gap
-    : (heights[0] || 0) * 2 + gap;
-  grid.style.setProperty('--grid-h', `${Math.ceil(two)}px`);
-}
-
-function scheduleGridFit() {
-  clearTimeout(window.__gridTimer);
-  window.__gridTimer = setTimeout(fitGridHeight, 150);
-}
-
-window.addEventListener('resize', scheduleGridFit);
 
 function patchRoom(snap) {
   const card = $(`.card[data-id="${snap.id}"]`);
@@ -687,8 +659,6 @@ function patchRoom(snap) {
   const titleEl = card.querySelector('.who .title');
   if (titleEl && view.title) titleEl.textContent = view.title;
   set('[data-f="check"]', checkText(view));
-  // 卡片状态变化（开始录制/停止）会把卡片撑高，跟着重新量一次两行高度
-  scheduleGridFit();
 }
 
 /* ── 弹幕 ──────────────────────────────────────────── */
