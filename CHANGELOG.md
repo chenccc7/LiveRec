@@ -1,4 +1,7 @@
-## 未发布
+## v0.2.1 · 2026-11-27
+
+- **免安装压缩包**：`LiveRec-v0.2.1-win64.zip`（解压即用，首次运行自动建 `data\`，压缩包里不再带任何 cookie 与直播间）。
+- 版本号 `0.2.0` → `0.2.1`（`liverec/__init__.py` 的 `__version__`、`liverec/server.py` 的 `APP_VERSION`）。
 
 - **老房间的画质名自动升级 + 自动落盘**（接上一条）：
   - `resolver.adjust_quality()` 命中同一档时一律返回平台自己的叫法（`原画` → `原画（蓝光10M）`），并删掉原来那句「该房间的这一档叫「原画」，已按它录制」的噪音；
@@ -45,8 +48,6 @@
 # 更新日志
 
 版本号规则：`v0.x.y` 递增，统一用 `git tag` 打标签；exe 只在明确要求时才上传到 GitHub Releases。
-
-## 未发布（待确认后再定版本号/tag）
 
 - **打包改为文件夹模式（onedir）**：`LiveRec.spec` 从单文件改为 `EXE(exclude_binaries=True) + COLLECT`，产物是 `dist\LiveRec\`（`LiveRec.exe` 17.8MB + `_internal\` 含内置 ffmpeg 105MB）。好处：启动不再往临时目录解压 100MB+，1～2 秒出控制台；目录结构透明（`_internal\bin\ffmpeg.exe`、`data\`、`data\manifests\`）；坏处：分发要整个文件夹（不能只拷 exe）。`run.py::_prepare_frozen_runtime()` 同时兼容两种模式：文件夹模式只把工作目录切到 exe 目录并记一行「程序目录：…」，单文件模式才去清 `runtime\_MEIxxxx` 残留。
 
@@ -96,7 +97,8 @@
 
 - 虎牙录制按 stream-rec 的做法整体重写（liverec/huya.py）：mp.huya.com 取房间信息（iPhone 微信 UA）、CDN × {flv,hls} × 码率线路矩阵、antiCode 本地重算（codec=264、u 旋转、ss）、WUP liveup.getCdnTokenInfo 兜底、udblgn Cookie 校验；录制改走本地 HLS 中转（每次刷新重签、分片过期即续段、收尾自动拼接）。
 - DISABLED_PLATFORMS 清空，虎牙重新可用；界面/README 里「虎牙已下线」的文案恢复。
-- liverec/hlsproxy.py：拉流转 erify=False（虎牙 CDN 证书链不完整）、非 URL 行与坏 URI 不再让整篇播放列表 500。
+- liverec/hlsproxy.py：拉流转 
+erify=False（虎牙 CDN 证书链不完整）、非 URL 行与坏 URI 不再让整篇播放列表 500。
 
 ## v0.2.0（2026-11-26）
 
