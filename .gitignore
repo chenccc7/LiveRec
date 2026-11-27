@@ -13,9 +13,6 @@ bin/*.exe
 bin/*.dll
 bin/ffmpeg.*
 
-# 上游核心代码（另一个 MIT 项目，用 tools\fetch_core.ps1 拉取，不重复托管）
-core/
-
 # Python / 编辑器
 __pycache__/
 *.py[cod]

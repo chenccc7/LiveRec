@@ -185,3 +185,8 @@ python -m PyInstaller LiveRec.spec --noconfirm --clean --distpath build\out --wo
 
 解析思路参考了 [ihmily/DouyinLiveRecorder](https://github.com/ihmily/DouyinLiveRecorder) 与
 [stream-rec](https://github.com/hua0512/stream-rec) 两个开源项目，本项目的实现是重新写的独立版本。
+
+## 许可
+
+本项目的代码按 MIT 协议使用。随发布压缩包分发的第三方组件（FFmpeg、Python 运行时、
+PyInstaller bootloader、V8 等）各自的许可，以及参考过的开源实现，全部列在 [NOTICE.md](NOTICE.md) 里。
