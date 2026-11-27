@@ -314,9 +314,10 @@ def _resolve_douyu(url: str, quality_code: str, cookie: str, proxy: str) -> dict
         "flv_url": stream_url,
         "record_url": stream_url,
     }
+    # rate=0（原画）也要回报实际档位：卡片和 URL_config 都按它显示/保存
+    requested = _QUALITY_LABEL.get(quality_code, quality_code)
+    result["quality_actual"] = requested
     if rate not in ("0", ""):
-        requested = _QUALITY_LABEL.get(quality_code, quality_code)
-        result["quality_actual"] = requested
         result["quality_note"] = f"斗鱼按所选档位取流（rate={rate}，{requested}）"
     return result
 
@@ -954,7 +955,12 @@ async def adjust_quality(
     items = [it for it in (info.get("qualities") or []) if isinstance(it, dict) and it.get("value")]
     if not info.get("ok") or not items:
         return {"ok": False, "effective": "", "note": ""}
-    if wanted in {str(it["value"]) for it in items}:
+    # 界面上的选项值现在是平台自己的档位名（原画（蓝光10M）），
+    # 所以要连 label 一起比，别把同一个档位当成「不存在」。
+    def _names(item: dict[str, Any]) -> set[str]:
+        return {str(item.get("value") or ""), str(item.get("label") or "")}
+
+    if wanted and any(wanted in _names(it) for it in items):
         return {"ok": True, "effective": wanted, "note": ""}
 
     def _bitrate_of(item: dict[str, Any]) -> int:
@@ -969,16 +975,16 @@ async def adjust_quality(
     if canon:
         same = [it for it in items if _name_to_quality(str(it["value"])) == canon]
         if same:
+            # 同一档就用平台自己的叫法（原画（蓝光10M）），这也正是要存进配置的名字
             best_same = max(same, key=_bitrate_of)
-            effective_same = str(best_same["value"])
-            note_same = "" if (effective_same == wanted or wanted in effective_same) else f"该房间的这一档叫「{effective_same}」，已按它录制"
-            return {"ok": True, "effective": effective_same, "note": note_same}
+            effective_same = str(best_same.get("label") or best_same["value"])
+            return {"ok": True, "effective": effective_same, "note": ""}
 
     target = _wanted_bitrate(wanted)
     best = items[0]
     if target:
         best = min(items, key=lambda it: (abs(_bitrate_of(it) - target), -_bitrate_of(it)))
-    effective = str(best["value"])
+    effective = str(best.get("label") or best["value"])
     note = f"该房间当前没有「{wanted}」这一档，已按「{effective}」录制"
     return {"ok": True, "effective": effective, "note": note}
 
@@ -1069,7 +1075,10 @@ async def resolve(
         return {"is_live": True, "platform": platform, "anchor_name": "", "title": "",
                 "record_url": url}
 
-    code = QUALITY_CODES.get(quality_zh, "OD")
+    # 用户在界面上选的是平台自己的档位名（如「原画（蓝光10M）」），
+    # 先用它归一到六档再查码，否则带括号的名字会被当成「原画」。
+    canonical = _name_to_quality(quality_zh) or quality_zh
+    code = QUALITY_CODES.get(canonical, "OD")
     try:
         info = await asyncio.to_thread(_blocking_resolve, url, platform, code, cookie, proxy,
                                        semaphore, quality_zh, probe)
@@ -1077,5 +1086,11 @@ async def resolve(
         msg = str(exc) if getattr(exc, "user_facing", False) else f"{type(exc).__name__}: {exc}"
         return {"is_live": False, "platform": platform, "anchor_name": "", "title": "",
                 "record_url": "", "error": msg}
+    # 平台自己的档位名更精确（原画（蓝光10M） vs 原画）：只要和实际取到的
+    # 是同一档，就用用户选的那个名字回填，这样 URL_config.ini 记的是真实档位。
+    raw = (quality_zh or "").strip()
+    actual = str(info.get("quality_actual") or "").strip()
+    if raw and actual and _name_to_quality(raw) == _name_to_quality(actual):
+        info["quality_actual"] = raw
     info["platform"] = platform
     return info

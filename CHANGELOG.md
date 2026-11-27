@@ -1,5 +1,12 @@
 ## 未发布
 
+- **添加直播间时记住平台自己的画质名**（用户反馈：斗鱼选「原画（蓝光10M）」，`URL_config.ini` 里却存成「原画」）：
+  - 弹窗画质下拉的选项值改成平台原名（`原画（蓝光10M）`/`超清`…），六档归类挪到 `data-value`，所以保存进配置的就是真实档位；
+  - `/api/preview` 多了 `quality` 参数，按弹窗里当前选的那一档去解析（之前固定用全局默认档，导致「实际画质」永远是原画）；改选画质会重新识别一次；
+  - `resolver.resolve()` 先用 `_name_to_quality()` 把带括号的名字归一再查码，并在「实际档位与所选档位同属一档」时把平台原名回填到 `quality_actual`；
+  - `resolver.adjust_quality()` 连 `label` 一起比对，同档直接沿用平台叫法、不再误报「这一档叫…，已按它录制」，真降级才提示；
+  - 斗鱼 `rate=0`（原画）也回报 `quality_actual`，卡片与 `URL_config.ini` 显示/保存的是「原画（蓝光10M）」而不是「原画」。
+
 - **清掉保存设置时的三条无关日志**（用户反馈）：保存设置后日志里会冒出「使用浏览器 app 窗口：msedge.exe」「托盘唤回控制台（browser-app）…」「ffmpeg 已改回内置：…」。前两条是开窗/唤回窗口时打的（保存设置本身不开窗），直接删掉；第三条是 `api_settings` 里只要请求带了 `ffmpegPath` 就无条件打（前端每次保存都会带），改成**只有值真的变了**才记一条。
 - **删掉上游 core 的遗留依赖**：`liverec/resolver.py` 的 `_ensure_core()` 从来没被调用过（四个平台都是本仓库内置实现），连同 `_lock/_core_loaded/_spider/_stream/_utils` 一起删除；`liverec/paths.py` 的 `core_dir()` / `node_exe()` / `seed_config()` 和 `ffmpeg_exe()` 里的 core 回落一并去掉；`LiveRec.spec` 不再打包 `core/config`。顺手删掉仓库里的 `core/`（103MB、2055 个文件）、`prototype/`、`docs/release-v0.1.1.md`、`docs/release-v0.2.0.md`、`docs/screenshot-*.png` 旧图和 `tools/fetch_core.ps1`。
 - **配置文件自动收敛**：`liverec/config.py` 新增 `REC_KEYS` 白名单与 `normalize_keys()`，启动时删掉上游遗留的 `[推送配置]`、`[Authorization]`、`[账号密码]` 三个整段和 `[录制设置]` 里 20 多个没人读的键（`language`、`是否跳过代理检测`、`排队读取网址时间(秒)`、`录制空间剩余阈值(gb)`、`录制完成后自动转为mp4格式` …），`[Cookie]` 只留抖音/B站/虎牙/斗鱼四个，缺失的必备键补默认值。无变更不写文件，两份部署各自收敛。

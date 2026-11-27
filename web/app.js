@@ -838,13 +838,20 @@ function setQualityOptions(items, note) {
     setQualityNote(note || '');
     return;
   }
+  // value 用平台自己的档位名（原画（蓝光10M）），六档归类放在 data-value：
+  // 这样保存进 URL_config.ini 的就是真实档位，而不是被归一的「原画」。
   sel.innerHTML = items.map(it => {
     const native = it.native ? ` data-native="${escapeHtml(it.native)}"` : '';
-    return `<option value="${escapeHtml(it.value)}"${native}>${escapeHtml(it.label)}</option>`;
+    return `<option value="${escapeHtml(it.label || it.value)}" data-value="${escapeHtml(it.value)}"${native}>${escapeHtml(it.label || it.value)}</option>`;
   }).join('');
-  const values = items.map(it => it.value);
-  const fallback = (items.find(it => it.default) || items[0]).value;
-  sel.value = values.includes(prev) ? prev : fallback;
+  const labels = items.map(it => it.label || it.value);
+  const canon = items.map(it => it.value);
+  const fallback = (items.find(it => it.default) || items[0]).label || items[0].value;
+  if (labels.includes(prev)) sel.value = prev;
+  else {
+    const hit = canon.indexOf(prev);
+    sel.value = hit >= 0 ? labels[hit] : fallback;
+  }
   setQualityNote(note || '');
 }
 
@@ -951,6 +958,12 @@ function setDetect(info) {
 let detectTimer = null;
 let detectSeq = 0;
 
+/** 弹窗里当前选中的画质：平台自己的档位名（原画（蓝光10M）/超清/…）。 */
+function curQuality() {
+  const sel = $$('#mask .modal select')[0];
+  return (sel && sel.value) || (S.settings && S.settings.quality) || '原画';
+}
+
 function detect(url, force) {
   const box = $('#mask .modal .detect');
   const u = String(url || '').trim();
@@ -964,7 +977,7 @@ function detect(url, force) {
     const seq = ++detectSeq;
     const qseq = ++qualitySeq;
     try {
-      const info = await api('/api/preview', { method: 'POST', body: { url: u } });
+      const info = await api('/api/preview', { method: 'POST', body: { url: u, quality: curQuality() } });
       if (seq === detectSeq) {
         S.previewQualityActual = (info && info.qualityActual) || '';
         setDetect(info);
@@ -994,6 +1007,15 @@ $('#btn-close').onclick = closeMask;
 (() => {
   const sel = segSelect();
   if (sel) sel.addEventListener('change', () => syncSegInput(S.editing));
+})();
+
+(() => {
+  const sel = $$('#mask .modal select')[0];
+  if (!sel) return;
+  sel.addEventListener('change', () => {
+    const u = (S.editing && S.editing.url) || ($('#mask .modal input') || {}).value || '';
+    if (u) detect(u, true);
+  });
 })();
 
 optRows().forEach((row, idx) => {

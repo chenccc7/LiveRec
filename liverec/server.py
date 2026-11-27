@@ -94,6 +94,7 @@ class PathBody(BaseModel):
 
 class PreviewBody(BaseModel):
     url: str
+    quality: str | None = None
 
 
 class UnattendedBody(BaseModel):
@@ -292,7 +293,9 @@ async def api_preview(body: PreviewBody):
     platform = resolver.detect_platform(url)
     if platform == "unknown":
         return {"ok": False, "platform": platform, "error": "无法识别的平台链接"}
-    info = await resolver.resolve(url, cfg.quality(), cfg.cookie(platform), "")
+    # 用弹窗里当前选的那一档去解析，否则「实际画质」永远是全局默认档
+    info = await resolver.resolve(url, (body.quality or "").strip() or cfg.quality(),
+                                  cfg.cookie(platform), "")
     return {
         "ok": not info.get("error"),
         "platform": platform,
