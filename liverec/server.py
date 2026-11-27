@@ -144,6 +144,12 @@ async def _apply_startup() -> None:
         cfg.apply_ffmpeg_path()
     except Exception as exc:  # 配置里那条路径写坏了也不能拖垮启动
         log("WARN", f"自定义 ffmpeg 路径不可用，改用内置：{exc}")
+    # 解析并发上限（设置里的「同时解析线程数」）：启动时就要生效，
+    # 不能等用户点一次「保存设置」才应用（否则一直用 resolver 里的默认 6）。
+    try:
+        resolver.set_concurrency(cfg.concurrent())
+    except Exception as exc:  # 配置写坏了也不能拖垮启动
+        log("WARN", f"解析并发上限设置无效，按默认值运行：{exc}")
     log("INFO", f"LiveRec 控制台 v{APP_VERSION} 已启动 · ffmpeg={paths.ffmpeg_exe()}")
     try:
         await manager.resume_unattended()
