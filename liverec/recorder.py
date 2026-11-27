@@ -154,6 +154,9 @@ class RecordTask:
         # 最近一次文件体积增长的时刻。只用来判断「虎牙这一段是不是卡死了要换新地址」，
         # 不会因为超时就停止录制（停止是用户明确要求去掉的）。
         self._last_growth = 0.0
+        # 分片模式下 ffmpeg 自报的「这一段写了多少」：只用来判断有没有在写，
+        # 不参与卡片体积（体积以磁盘为准，避免和已合并成品重复累加）。
+        self._attempt_bytes = 0
         self._quality_checked = False  # 本场是否已经按房间真实档位校正过画质
 
     # ---------- 对外快照 ----------
@@ -298,7 +301,24 @@ class RecordTask:
             # 分段文件都还在磁盘上，用户仍能拿到内容，日志里写清原因即可。
             log("WARN", f"{self.anchor or self.url} 收尾合并失败（分段已保留）：{type(exc).__name__}: {exc}")
             self.note = "已停止（合并失败，分段文件已保留）"
+        # 合并前后体积会有一点差（容器头、被丢掉的多余分片），停下来的这一刻
+        # 按磁盘上的真实文件重算一次，卡片上的数字才是「双击能看到的那个大小」。
+        self._snap_size()
         self.push(force=True)
+
+    def _snap_size(self) -> None:
+        """按磁盘真实体积校正 size（允许变小，和 _refresh_disk 的单调策略相反）。"""
+        if not self.out_dir or not self._files_prefix:
+            return
+        saved_shard, saved_base, saved_size = self._shard_mode, self._base_bytes, self.size
+        self._shard_mode, self._base_bytes, self.size = False, 0, 0
+        try:
+            self._refresh_disk()
+        except Exception:  # noqa: BLE001
+            self.size = saved_size
+            self.size_text = _fmt_size(saved_size)
+        finally:
+            self._shard_mode, self._base_bytes = saved_shard, saved_base
 
     async def _kill_proc(self) -> None:
         proc = self._proc
@@ -1533,6 +1553,19 @@ class RecordTask:
                 new_size = int(val)
             except ValueError:
                 return
+            if self._shard_mode:
+                # 分片模式的体积以磁盘扫描为准（保存目录里的成品 + 临时目录里还在攒的分片），
+                # ffmpeg 报的只是这一段新写的字节，再加上 _base_bytes 会重复累加。
+                # 但「有没有在写」要看 ffmpeg 自己：Windows 目录项大小是懒更新的，
+                # 光靠磁盘扫描会把「正在写」误判成 8 秒没数据。
+                # 注意不能只判「变大」：开分段时 ffmpeg 每切一个分片 total_size 会从头
+                # 再报一次（2 MB → 0.1 MB），只判变大就会在切点之后误判成 8 秒没数据。
+                if new_size != getattr(self, "_attempt_bytes", 0):
+                    self._last_growth = time.time()
+                self._attempt_bytes = new_size
+                if not self._first_byte_at and new_size > 0:
+                    self._first_byte_at = time.time()
+                return
             if self._base_bytes + new_size != self.size:
                 self._last_growth = time.time()
             self.size = self._base_bytes + new_size
@@ -1583,12 +1616,19 @@ class RecordTask:
                     continue
         total += shard_bytes
         if total:
-            # 磁盘上的大小是懒更新的（Windows 关闭句柄前目录项可能一直是旧值），
-            # 只认「涨」，不能把 ffmpeg 自报的 total_size 再压回去，否则会误判成停写。
-            total = max(total, self.size - self._base_bytes)
-            if self._base_bytes + total > self.size:
+            before = self.size
+            if self._shard_mode:
+                # 分片模式：保存目录里是已经合并好的成品，临时目录里是还在攒的分片，
+                # 两边加起来就是这一场的真实体积。不能再加 _base_bytes，否则同一批
+                # 字节会被反复累加（实测能涨到实际值的 20 倍）。
+                self.size = max(self.size, total)
+            else:
+                # 磁盘上的大小是懒更新的（Windows 关闭句柄前目录项可能一直是旧值），
+                # 只认「涨」，不能把 ffmpeg 自报的 total_size 再压回去，否则会误判成停写。
+                total = max(total, self.size - self._base_bytes)
+                self.size = self._base_bytes + total
+            if self.size > before:
                 self._last_growth = time.time()
-            self.size = self._base_bytes + total
             if not self._first_byte_at:
                 self._first_byte_at = time.time()
             self.size_text = _fmt_size(self.size)
