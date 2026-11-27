@@ -955,13 +955,8 @@ async def adjust_quality(
     items = [it for it in (info.get("qualities") or []) if isinstance(it, dict) and it.get("value")]
     if not info.get("ok") or not items:
         return {"ok": False, "effective": "", "note": ""}
-    # 界面上的选项值现在是平台自己的档位名（原画（蓝光10M）），
-    # 所以要连 label 一起比，别把同一个档位当成「不存在」。
     def _names(item: dict[str, Any]) -> set[str]:
         return {str(item.get("value") or ""), str(item.get("label") or "")}
-
-    if wanted and any(wanted in _names(it) for it in items):
-        return {"ok": True, "effective": wanted, "note": ""}
 
     def _bitrate_of(item: dict[str, Any]) -> int:
         try:
@@ -969,6 +964,14 @@ async def adjust_quality(
         except ValueError:
             native = 0
         return native or _wanted_bitrate(str(item.get("value") or "")) or 1
+
+    # 命中同一档时一律用平台自己的叫法（原画 → 原画（蓝光10M））：
+    # 界面上原来存的是归一后的「原画」，这里顺手升级成真实档位。
+    hits = [it for it in items if wanted and wanted in _names(it)]
+    if hits:
+        best_hit = max(hits, key=_bitrate_of)
+        effective_hit = str(best_hit.get("label") or best_hit["value"])
+        return {"ok": True, "effective": effective_hit, "note": ""}
 
     # 「原画」这类通用叫法对上平台自己的档位名（原画（蓝光30M））时直接认同一档，不啰嗦
     canon = _name_to_quality(wanted)

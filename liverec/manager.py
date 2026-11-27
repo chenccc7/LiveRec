@@ -420,9 +420,18 @@ class Manager:
             snap["quality"] = live_quality or room.get("quality")
             # 实际解析到的档位同样以运行中的任务为准，并回写元数据，供 URL_config.ini 使用
             live_actual = snap.get("qualityActual")
-            if rid in self.runtime and live_actual:
+            changed = False
+            if rid in self.runtime and live_actual and live_actual != room.get("qualityActual"):
                 room["qualityActual"] = live_actual
+                changed = True
             snap["qualityActual"] = live_actual or room.get("qualityActual") or ""
+            if changed:
+                # 真实档位变化了就落盘一次，让 URL_config.ini 跟着刷成「原画（蓝光10M）」，
+                # 而不是一直留着添加直播间时那个归一后的「原画」。
+                try:
+                    self.save()
+                except Exception:  # noqa: BLE001 - 落盘失败不影响状态查询
+                    pass
             out.append(snap)
         return out
 
