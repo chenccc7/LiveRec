@@ -53,6 +53,8 @@ class Hub:
 class StartBody(BaseModel):
     url: str = ""
     quality: str | None = None
+    # 前端预览解析到的实际档位（用户选原画、平台只给超清时是「超清」）
+    qualityActual: str | None = None
     danmaku: bool = True
     anchor: str = ""
     start: bool = True
@@ -62,6 +64,7 @@ class StartBody(BaseModel):
 
 class PatchBody(BaseModel):
     quality: str | None = None
+    qualityActual: str | None = None
     splitMode: str | None = None
     splitSeconds: int | None = None
     danmaku: bool | None = None
@@ -297,6 +300,9 @@ async def api_preview(body: PreviewBody):
         "anchor": info.get("anchor_name") or "",
         "title": info.get("title") or "",
         "isLive": bool(info.get("is_live")),
+        "quality": info.get("quality") or "",
+        "qualityActual": info.get("quality_actual") or "",
+        "qualityNote": info.get("quality_note") or "",
         "error": info.get("error") or "",
     }
 
@@ -320,7 +326,8 @@ async def api_add_room(body: StartBody):
     try:
         room = manager.add(body.url, body.quality, body.danmaku, body.anchor,
                            split_mode=body.splitMode or "default",
-                           split_seconds=body.splitSeconds or 0)
+                           split_seconds=body.splitSeconds or 0,
+                           quality_actual=body.qualityActual or "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.start:
@@ -425,6 +432,7 @@ async def api_get_settings():
 @app.post("/api/settings")
 async def api_set_settings(body: SettingsBody):
     data = body.model_dump(exclude_none=True)
+    before_settings = cfg.to_dict()
     cookies = data.pop("cookies", None)
     # ffmpeg 路径要先校验：填了但文件不存在时直接 400，别让用户以为换成功了
     wanted_ffmpeg = (data.get("ffmpegPath") or "").strip().strip('"').strip("'")
@@ -438,10 +446,15 @@ async def api_set_settings(body: SettingsBody):
         if clean:
             cfg.apply_dict({"cookies": clean})
     resolver.set_concurrency(cfg.concurrent())
-    if wanted_ffmpeg:
-        log("INFO", f"ffmpeg 路径已切换：{paths.ffmpeg_exe()}")
-    elif "ffmpegPath" in data:
-        log("INFO", f"ffmpeg 已改回内置：{paths.ffmpeg_exe()}")
+    before_ffmpeg = before_settings.get("ffmpegPath") or ""
+    if "ffmpegPath" in data:
+        stored = cfg.to_dict().get("ffmpegPath") or ""
+        if wanted_ffmpeg and wanted_ffmpeg != before_ffmpeg:
+            log("INFO", f"ffmpeg 路径已切换：{paths.ffmpeg_exe()}")
+        elif not wanted_ffmpeg and before_ffmpeg:
+            log("INFO", f"ffmpeg 已改回内置：{paths.ffmpeg_exe()}")
+        elif not stored:
+            pass
     log("INFO", "全局设置已保存")
     return {"ok": True, "settings": cfg.to_dict()}
 

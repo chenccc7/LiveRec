@@ -1,59 +1,24 @@
-"""直播流地址解析：复用上游 core/src 的 spider + stream。
+"""直播流地址解析：四个平台都是本仓库内置实现，不再依赖上游 core。
 
-上游的解析函数全是 async，且内部会用 execjs 做签名（阻塞），
-所以统一放进线程 + 独立事件循环里跑，避免卡住服务端主循环。
+解析过程是同步阻塞的（requests + 签名），调用方统一用 asyncio.to_thread 丢进
+线程池，并用一个全局信号量限制「同一时刻有多少个直播间在访问网络」。
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import sys
 import threading
 import time
 from typing import Any
 
-from . import paths
 from .logbook import log
-
-_lock = threading.Lock()
-_core_loaded = False
-_spider: Any = None
-_stream: Any = None
-_utils: Any = None
 
 
 class ResolveError(RuntimeError):
     """解析失败：消息本身面向用户展示，界面不再加异常类名前缀。"""
 
     user_facing = True
-
-
-def _ensure_core() -> None:
-    """把 core 目录加入 sys.path 并懒加载上游模块。"""
-    global _core_loaded, _spider, _stream, _utils
-    if _core_loaded:
-        return
-    with _lock:
-        if _core_loaded:
-            return
-        core = paths.core_dir()
-        if core not in sys.path:
-            sys.path.insert(0, core)
-        # 上游 initializer 发现 PATH 里没有 node 会去下载 37MB 的 Node.js，
-        # 这里先把 core/node（已存在时）塞进 PATH，避免每次启动都下载。
-        node = paths.node_exe()
-        if node:
-            node_dir = os.path.dirname(node)
-            env_path = os.environ.get("PATH", "")
-            if node_dir not in env_path:
-                os.environ["PATH"] = node_dir + os.pathsep + env_path
-        from core.src import spider, stream, utils  # noqa: PLC0415
-
-        _spider, _stream, _utils = spider, stream, utils
-        _core_loaded = True
-        log("INFO", "上游解析模块已加载（core/src）")
 
 
 PLATFORMS = {
@@ -593,7 +558,13 @@ def _douyin_enter(web_rid: str, cookie: str, proxy: str) -> tuple[dict[str, Any]
     return rows[0], data.get("user") or {}
 
 
-def _douyin_stream(room: dict[str, Any], quality_code: str) -> str:
+# 抖音 flv_pull_url 的档位键 → 界面上的档位名（用于回填「实际画质」）
+_DOUYIN_KEY_DESC = {"origin": "原画", "FULL_HD1": "蓝光", "HD1": "超清",
+                    "SD1": "高清", "SD2": "标清"}
+
+
+def _douyin_stream(room: dict[str, Any], quality_code: str) -> tuple[str, str]:
+    """返回 (取流地址, 实际用到的档位键)。"""
     import json  # noqa: PLC0415
 
     stream_url = room.get("stream_url") or {}
@@ -608,13 +579,22 @@ def _douyin_stream(room: dict[str, Any], quality_code: str) -> str:
         except Exception:
             origin = ""
     key = _DOUYIN_QUALITY.get(quality_code, "origin")
+    used = key
     if key == "origin":
-        chosen = origin or pulls.get("FULL_HD1") or ""
+        chosen = origin
+        if not chosen:
+            chosen = pulls.get("FULL_HD1") or ""
+            used = "FULL_HD1"
     else:
-        chosen = pulls.get(key) or origin or ""
+        chosen = pulls.get(key) or ""
+        if not chosen:
+            chosen = origin or ""
+            used = "origin"
     if not chosen and pulls:
-        chosen = next(iter(pulls.values()))
-    return chosen.replace("http://", "https://", 1) if chosen.startswith("http://") else chosen
+        used = next(iter(pulls.keys()))
+        chosen = pulls[used] or ""
+    chosen = chosen.replace("http://", "https://", 1) if chosen.startswith("http://") else chosen
+    return chosen, used
 
 
 def _resolve_douyin(url: str, quality_code: str, cookie: str, proxy: str) -> dict[str, Any]:
@@ -627,10 +607,15 @@ def _resolve_douyin(url: str, quality_code: str, cookie: str, proxy: str) -> dic
     }
     if not result["is_live"]:
         return result
-    stream = _douyin_stream(room, quality_code)
+    stream, used = _douyin_stream(room, quality_code)
     if not stream:
         raise ResolveError("抖音未返回可用直播流（该直播间可能限制网页端观看）")
-    result.update({"quality": quality_code, "flv_url": stream, "record_url": stream})
+    result.update({
+        "quality": quality_code,
+        "quality_actual": _DOUYIN_KEY_DESC.get(used, ""),
+        "flv_url": stream,
+        "record_url": stream,
+    })
     return result
 
 

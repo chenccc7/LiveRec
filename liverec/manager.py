@@ -103,8 +103,9 @@ class Manager:
             log("WARN", f"保存房间清单失败：{exc}")
         try:
             write_url_config([
-                {"quality": r.get("quality"), "url": r.get("url"),
-                 "anchor": r.get("anchor"), "enabled": r.get("enabled", True)}
+                {"quality": r.get("quality"), "qualityActual": r.get("qualityActual"),
+                 "url": r.get("url"), "anchor": r.get("anchor"),
+                 "enabled": r.get("enabled", True)}
                 for r in (self.meta[rid] for rid in self._order if rid in self.meta)
             ])
         except OSError:
@@ -130,7 +131,7 @@ class Manager:
     # ---------- 房间 CRUD ----------
     def add(self, url: str, quality: str | None = None, danmaku: bool = True,
             anchor: str = "", split_mode: str = "default",
-            split_seconds: int = 0) -> dict[str, Any]:
+            split_seconds: int = 0, quality_actual: str = "") -> dict[str, Any]:
         url = (url or "").strip()
         if not url:
             raise ValueError("直播间地址不能为空")
@@ -160,6 +161,8 @@ class Manager:
             # 分段策略：default=跟随全局配置，off=不分段，custom=自定义时长
             "splitMode": (split_mode or "default").lower(),
             "splitSeconds": max(0, int(split_seconds or 0)),
+            # 实际解析到的画质（用户选原画、平台只给超清时就是「超清」），写进 URL_config.ini
+            "qualityActual": (quality_actual or "").strip(),
         }
         self.meta[rid] = room
         self._order.append(rid)
@@ -173,7 +176,7 @@ class Manager:
         if not room:
             raise KeyError(rid)
         for key in ("quality", "danmaku", "enabled", "anchor", "url", "unattended",
-                    "splitMode", "splitSeconds"):
+                    "splitMode", "splitSeconds", "qualityActual"):
             if key in patch and patch[key] is not None:
                 room[key] = bool(patch[key]) if key == "unattended" else patch[key]
         task = self.tasks.get(rid)
@@ -415,6 +418,11 @@ class Manager:
             if rid in self.runtime and live_quality and live_quality != room.get("quality"):
                 room["quality"] = live_quality      # 同步回元数据，下次启动也沿用真实档位
             snap["quality"] = live_quality or room.get("quality")
+            # 实际解析到的档位同样以运行中的任务为准，并回写元数据，供 URL_config.ini 使用
+            live_actual = snap.get("qualityActual")
+            if rid in self.runtime and live_actual:
+                room["qualityActual"] = live_actual
+            snap["qualityActual"] = live_actual or room.get("qualityActual") or ""
             out.append(snap)
         return out
 

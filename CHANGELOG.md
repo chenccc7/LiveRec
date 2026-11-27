@@ -1,5 +1,11 @@
 ## 未发布
 
+- **清掉保存设置时的三条无关日志**（用户反馈）：保存设置后日志里会冒出「使用浏览器 app 窗口：msedge.exe」「托盘唤回控制台（browser-app）…」「ffmpeg 已改回内置：…」。前两条是开窗/唤回窗口时打的（保存设置本身不开窗），直接删掉；第三条是 `api_settings` 里只要请求带了 `ffmpegPath` 就无条件打（前端每次保存都会带），改成**只有值真的变了**才记一条。
+- **删掉上游 core 的遗留依赖**：`liverec/resolver.py` 的 `_ensure_core()` 从来没被调用过（四个平台都是本仓库内置实现），连同 `_lock/_core_loaded/_spider/_stream/_utils` 一起删除；`liverec/paths.py` 的 `core_dir()` / `node_exe()` / `seed_config()` 和 `ffmpeg_exe()` 里的 core 回落一并去掉；`LiveRec.spec` 不再打包 `core/config`。顺手删掉仓库里的 `core/`（103MB、2055 个文件）、`prototype/`、`docs/release-v0.1.1.md`、`docs/release-v0.2.0.md`、`docs/screenshot-*.png` 旧图和 `tools/fetch_core.ps1`。
+- **配置文件自动收敛**：`liverec/config.py` 新增 `REC_KEYS` 白名单与 `normalize_keys()`，启动时删掉上游遗留的 `[推送配置]`、`[Authorization]`、`[账号密码]` 三个整段和 `[录制设置]` 里 20 多个没人读的键（`language`、`是否跳过代理检测`、`排队读取网址时间(秒)`、`录制空间剩余阈值(gb)`、`录制完成后自动转为mp4格式` …），`[Cookie]` 只留抖音/B站/虎牙/斗鱼四个，缺失的必备键补默认值。无变更不写文件，两份部署各自收敛。
+- **URL_config.ini 里记真实画质**（用户反馈：除虎牙外，其它平台保存的画质不是实际解析出来的那档）：`liverec/resolver.py` 的抖音解析补上 `quality_actual`（`origin/ FULL_HD1/ HD1/ SD1/ SD2` 映射成 原画/蓝光/超清/高清/标清，原画没流时回落并标记实际档位）；`liverec/manager.py` 的 room 增加 `qualityActual` 字段，`snapshot()` 用运行中任务的真实档位回写元数据，`write_url_config()` 优先写 `qualityActual`；`liverec/server.py` 的 `StartBody`/`PatchBody` 增加 `qualityActual`、`/api/preview` 回传 `quality`/`qualityActual`/`qualityNote`；添加/编辑弹窗保存时把预览到的实际档位一起提交。
+- **README 按现有功能重写**：替换掉整份文档（功能、平台支持、录制切段与合并规则、断流与等待开播、设置项、配置文件、命令行、开发打包、常见问题、已知限制），截图重拍为主界面 / 添加直播间 / 全局设置 / 弹幕抽屉四张。
+
 - 「同时解析线程数」现在启动时就生效：原来只在保存设置时调用 `resolver.set_concurrency()`，开头一直吃 `resolver.py` 里硬编码的 `Semaphore(6)`，配置写 2 或 10 都要等用户点一次「保存设置」才应用
 
 

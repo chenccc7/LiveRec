@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置：单文件 exe（内嵌 ffmpeg、前端静态资源、默配置模板）。"""
+"""PyInstaller 打包配置：文件夹模式（内嵌 ffmpeg 与前端静态资源）。"""
 import os
 
 import py_mini_racer
@@ -8,7 +8,6 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas = [
     ("web", "web"),
-    ("core/config", "core/config"),
     ("bin/ffmpeg.exe", "bin"),
     ("bin/liverec.ico", "bin"),
     ("liverec/danmaku/assets", "liverec/danmaku/assets"),

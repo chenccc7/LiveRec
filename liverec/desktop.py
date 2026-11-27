@@ -236,7 +236,7 @@ class AppWindow:
                 "--no-first-run",
                 "--no-default-browser-check",
             ]
-            log("INFO", f"使用浏览器 app 窗口：{os.path.basename(browser)}")
+            # 走哪条开窗路径对用户没有意义，这里不打日志（日志只留真正有用的信息）
             self.proc = subprocess.Popen([browser, *args])
             self.mode = "browser-app"
             return "browser-app"

@@ -13,10 +13,7 @@ from typing import Any
 from . import paths
 
 SEC_REC = "录制设置"
-SEC_PUSH = "推送配置"
 SEC_COOKIE = "Cookie"
-SEC_AUTH = "Authorization"
-SEC_ACCOUNT = "账号密码"
 
 # 上游的「键名」里带可选取值，直接当键名用
 K_QUALITY = "原画|超清|高清|标清|流畅"
@@ -25,6 +22,27 @@ K_FORMAT = "视频保存格式ts|mkv|flv|mp4|mp3音频|m4a音频"
 K_DANMAKU_ROOT = "弹幕保存路径(不填则跟随视频目录)"
 # 自定义 ffmpeg.exe 路径；留空 = 用内置（bin/ffmpeg.exe）或 PATH 里的那个
 K_FFMPEG = "ffmpeg路径(不填则用内置)"
+K_SAVE_ROOT = "直播保存路径(不填则默认)"
+K_FOLDER_BY_AUTHOR = "保存文件夹是否以作者区分"
+K_CONCURRENT = "同一时间访问网络的线程数"
+K_SPLIT_ON = "分段录制是否开启"
+K_SPLIT_SECONDS = "视频分段时间(秒)"
+K_CHECK_INTERVAL = "开播检测间隔(秒)"
+
+# 只有这些键是本程序真正读写的；其它（上游遗留的推送/账号/几十个平台 cookie 等）
+# 一律在启动时清掉，配置文件保持干净，用户也不会被一堆没用的键看晕。
+REC_KEYS: tuple[tuple[str, str], ...] = (
+    (K_SAVE_ROOT, ""),
+    (K_FOLDER_BY_AUTHOR, "是"),
+    (K_FORMAT, "flv"),
+    (K_QUALITY, "原画"),
+    (K_CONCURRENT, "5"),
+    (K_SPLIT_ON, "是"),
+    (K_SPLIT_SECONDS, "1800"),
+    (K_DANMAKU_ROOT, ""),
+    (K_FFMPEG, ""),
+    (K_CHECK_INTERVAL, "60"),
+)
 
 QUALITY_CODES = {
     "原画": "OD",
@@ -60,6 +78,8 @@ class Config:
         self.cp = _new_parser()
         self.reload()
         try:
+            # 清掉上游遗留的无关键、补齐缺失的必备键（幂等，无变更不写文件）
+            self.normalize_keys()
             # 整个文件夹被搬走后，老的绝对路径会失效：启动时就地改写成相对路径
             self.relocate_paths()
         except Exception:  # noqa: BLE001 - 迁移失败不影响启动
@@ -172,6 +192,42 @@ class Config:
             if head in ("downloads", "config", "manifests", "danmaku", "logs", "merge-tmp"):
                 return os.path.normpath(os.path.join(paths.app_root(), "data", tail))
         return expanded
+
+    def normalize_keys(self) -> None:
+        """只保留本程序真正使用的配置键，缺失的必备键写默认值（幂等）。"""
+        changed = False
+        with self._lock:
+            keep_sections = {SEC_REC, SEC_COOKIE}
+            for name in list(self.cp.sections()):
+                if name not in keep_sections:
+                    self.cp.remove_section(name)
+                    changed = True
+            if not self.cp.has_section(SEC_REC):
+                self.cp.add_section(SEC_REC)
+                changed = True
+            wanted = {key: default for key, default in REC_KEYS}
+            for key in list(self.cp.options(SEC_REC)):
+                if key not in wanted:
+                    self.cp.remove_option(SEC_REC, key)
+                    changed = True
+            for key, default in REC_KEYS:
+                if not self.cp.has_option(SEC_REC, key):
+                    self.cp.set(SEC_REC, key, default)
+                    changed = True
+            if not self.cp.has_section(SEC_COOKIE):
+                self.cp.add_section(SEC_COOKIE)
+                changed = True
+            keep_cookies = set(COOKIE_KEYS.values())
+            for key in list(self.cp.options(SEC_COOKIE)):
+                if key not in keep_cookies:
+                    self.cp.remove_option(SEC_COOKIE, key)
+                    changed = True
+            for key in COOKIE_KEYS.values():
+                if not self.cp.has_option(SEC_COOKIE, key):
+                    self.cp.set(SEC_COOKIE, key, "")
+                    changed = True
+        if changed:
+            self.save()
 
     def relocate_paths(self) -> None:
         """启动时把「搬过的程序目录」留下的绝对路径改写成相对路径（幂等、无变更不写文件）。"""
@@ -309,7 +365,9 @@ def write_url_config(rooms: list[dict[str, Any]], path: str | None = None) -> No
     lines = ["# 由 LiveRec 控制台维护；格式：画质,URL,主播: 名字（行首 # 为停用）"]
     for room in rooms:
         anchor = (room.get("anchor") or "").strip()
-        body = f"{room.get('quality') or '原画'},{room.get('url')},主播: {anchor}"
+        # 画质写「实际解析到的档位」：用户选原画但平台只给超清时，这里就是超清
+        quality = (room.get("qualityActual") or room.get("quality") or "原画").strip()
+        body = f"{quality},{room.get('url')},主播: {anchor}"
         lines.append(("" if room.get("enabled", True) else "#") + body)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w", encoding="utf-8") as fh:

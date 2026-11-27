@@ -965,8 +965,10 @@ function detect(url, force) {
     const qseq = ++qualitySeq;
     try {
       const info = await api('/api/preview', { method: 'POST', body: { url: u } });
-      if (seq === detectSeq && !S.editing) setDetect(info);
-      else if (seq === detectSeq) setDetect(info);
+      if (seq === detectSeq) {
+        S.previewQualityActual = (info && info.qualityActual) || '';
+        setDetect(info);
+      }
       if (info.platform && info.platform !== 'unknown') {
         api(`/api/qualities?url=${encodeURIComponent(u)}`).then(q => {
           if (qseq !== qualitySeq) return;
@@ -1027,6 +1029,12 @@ if (saveBtn) {
         || Number(S.settings.splitSeconds) || 1800));
     }
 
+    // 预览解析到的实际档位：平台只给低档时，URL_config.ini 里要记真实画质
+    let qualityActual = S.previewQualityActual || '';
+    if (!qualityActual && S.editing && quality === (S.editing.quality || '')) {
+      qualityActual = S.editing.qualityActual || '';
+    }
+
     saveBtn.disabled = true;
     const oldText = saveBtn.textContent;
     saveBtn.textContent = '保存中…';
@@ -1038,13 +1046,13 @@ if (saveBtn) {
       if (S.editing) {
         await api(`/api/rooms/${S.editing.id}`, {
           method: 'PATCH',
-          body: { url, quality, danmaku: S.pendingDanmaku, splitMode, splitSeconds }
+          body: { url, quality, qualityActual, danmaku: S.pendingDanmaku, splitMode, splitSeconds }
         });
       } else {
         await api('/api/rooms', {
           method: 'POST',
-          body: { url, quality, danmaku: S.pendingDanmaku, start: true, anchor: '',
-                  splitMode, splitSeconds }
+          body: { url, quality, qualityActual, danmaku: S.pendingDanmaku, start: true,
+                  anchor: '', splitMode, splitSeconds }
         });
       }
       closeMask();

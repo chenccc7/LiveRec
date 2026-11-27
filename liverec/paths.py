@@ -22,10 +22,6 @@ def bundle_root() -> str:
     return app_root()
 
 
-def core_dir() -> str:
-    return os.path.join(bundle_root(), "core")
-
-
 def web_dir() -> str:
     return os.path.join(bundle_root(), "web")
 
@@ -57,20 +53,6 @@ def default_download_dir() -> str:
 
 def ui_state_path() -> str:
     return os.path.join(data_dir(), "ui_state.json")
-
-
-def seed_config() -> None:
-    """首次运行时把上游 core/config/*.ini 复制到 data/config。"""
-    src = os.path.join(core_dir(), "config")
-    dst = config_dir()
-    if not os.path.isdir(src):
-        return
-    for name in os.listdir(src):
-        if not name.lower().endswith(".ini"):
-            continue
-        target = os.path.join(dst, name)
-        if not os.path.exists(target):
-            shutil.copyfile(os.path.join(src, name), target)
 
 
 _FFMPEG_OVERRIDE: str = ""
@@ -106,19 +88,8 @@ def ffmpeg_exe() -> str:
     for cand in (
         os.path.join(bundle_root(), "bin", "ffmpeg.exe"),
         os.path.join(app_root(), "bin", "ffmpeg.exe"),
-        os.path.join(core_dir(), "bin", "ffmpeg.exe"),
     ):
         if os.path.exists(cand):
             return cand
     return shutil.which("ffmpeg") or "ffmpeg"
 
-
-def node_exe() -> str | None:
-    for cand in (
-        os.path.join(bundle_root(), "node", "node.exe"),
-        os.path.join(core_dir(), "node", "node.exe"),
-        os.path.join(app_root(), "node", "node.exe"),
-    ):
-        if os.path.exists(cand):
-            return cand
-    return shutil.which("node")

@@ -118,8 +118,9 @@ class Controller:
             from liverec.desktop import AppWindow
 
             self.window = AppWindow(self.url)
-        mode = self.window.show()
-        log("INFO", f"托盘唤回控制台（{mode}）{self.url}")
+        # 只是把窗口唤到前台，不写日志：这条对用户没有信息量，
+        # 反而会让人以为「保存设置」触发了开窗口。
+        self.window.show()
 
     def open_window(self) -> None:
         self.show_window()
@@ -270,7 +271,6 @@ def main() -> int:
     parser.add_argument("--tray-only", action="store_true", help="只驻留托盘，不自动开窗口")
     args = parser.parse_args()
 
-    paths.seed_config()
     _mark("init")
 
     # 同一个程序目录已经有一个实例在录：把窗口唤到前台就好，不要再起第二个录制进程。
