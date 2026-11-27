@@ -360,13 +360,46 @@ def parse_url_config(path: str | None = None) -> list[dict[str, Any]]:
     return out
 
 
+def _quality_class(name: str) -> str:
+    """把「原画（蓝光30M）/蓝光8M/超清…」归一到六档，用于判断有没有真降级。"""
+    try:
+        from .resolver import _name_to_quality
+
+        return _name_to_quality(str(name or "")) or ""
+    except Exception:  # noqa: BLE001 - 归一只用来做降级判断，失败就当作未知
+        return ""
+
+
+def effective_quality(room: dict[str, Any]) -> str:
+    """URL_config.ini 里那一列写什么。
+
+    - 用户选的是**平台自己的档位名**（虎牙「原画（蓝光30M）」、斗鱼「原画（蓝光10M）」）就原样写，
+      不能用归一后的「蓝光」把它盖掉；文件名里带码率，换平台后也知道当初要的是哪一档。
+    - 选的是归一档（原画/超清…）而平台实际只给了另一档（真降级），才写实际档位。
+    """
+    selected = str(room.get("quality") or "").strip()
+    actual = str(room.get("qualityActual") or "").strip()
+    if not selected:
+        return actual or "原画"
+    if not actual:
+        return selected
+    # 「原画（蓝光30M）」这种带括号的是平台自己的档位名，用户点到具体档位就以他选的为准；
+    # 归一函数的词表里「原画」优先，直接比较会把它误判成原画 vs 蓝光的「降级」。
+    if "（" in selected or "(" in selected:
+        return selected
+    sel_class = _quality_class(selected)
+    act_class = _quality_class(actual)
+    if sel_class and act_class and sel_class != act_class:
+        return actual
+    return selected
+
+
 def write_url_config(rooms: list[dict[str, Any]], path: str | None = None) -> None:
     target = path or os.path.join(paths.config_dir(), "URL_config.ini")
     lines = ["# 由 LiveRec 控制台维护；格式：画质,URL,主播: 名字（行首 # 为停用）"]
     for room in rooms:
         anchor = (room.get("anchor") or "").strip()
-        # 画质写「实际解析到的档位」：用户选原画但平台只给超清时，这里就是超清
-        quality = (room.get("qualityActual") or room.get("quality") or "原画").strip()
+        quality = effective_quality(room)
         body = f"{quality},{room.get('url')},主播: {anchor}"
         lines.append(("" if room.get("enabled", True) else "#") + body)
     os.makedirs(os.path.dirname(target), exist_ok=True)

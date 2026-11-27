@@ -712,6 +712,7 @@ class RecordTask:
                     # 攒够「单段时长」就把临时分片合并成一个成品放进保存目录
                     last_shard_check = time.time()
                     await self._flush_ready_shards()
+                    self._sync_segments()
                     self.push()
                 # 每分钟留一条「还活着」的日志：出问题时能一眼看出是录着不涨还是彻底没动。
                 if time.time() - last_beat >= 60 and self.size > 0:
@@ -1014,6 +1015,17 @@ class RecordTask:
                 moved += 1
         if moved:
             log("INFO", f"{self.anchor or self.url} 分段清单已归档到 {dest}（{moved} 个文本）")
+
+    def _sync_segments(self) -> None:
+        """卡片上的「第 N 段」= 已合并进保存目录的段数 + 正在录的这段。
+
+        虎牙是一边攒分片一边录，正在录的这段要到攒够时长才落盘，
+        只数已落盘的会一直比实际少 1（录第 3 段时显示第 2 段）。
+        """
+        if not getattr(self, "_shard_mode", False):
+            return
+        pending = 1 if getattr(self, "_batch_rows", None) else 0
+        self.segments = max(self._part_seq + pending, 1 if self.is_running() else 0)
 
     async def _flush_ready_shards(self) -> None:
         if not self._shard_mode:

@@ -308,8 +308,13 @@ def _pick_bitrate(rows: list[dict[str, Any]], wanted: str) -> dict[str, Any] | N
     if not rows:
         return None
     text = (wanted or "").strip()
+    inner = text
+    matched = re.match(r"^原画[（(](.+?)[）)]$", text)
+    if matched:
+        # 可选画质里最高档显示成「原画（蓝光30M）」，真实档位名在括号里
+        inner = matched.group(1).strip()
     for row in rows:  # 名字完全一致优先
-        if row.get("name") == text:
+        if row.get("name") in (text, inner):
             return row
     target = target_bitrate(text)
     canonical = _name_to_quality(text)
@@ -678,12 +683,16 @@ def resolve(url: str, quality_code: str = "OD", cookie: str = "", proxy: str = "
         note = f"没找到「{quality_code}」这一档，已按「{quality_name}」录"
     else:
         note = ""
+    # 「实际画质」写平台自己的档位名：可选画质里第一行是「原画（蓝光30M）」，
+    # 归一成「蓝光」会让 URL_config.ini 丢掉码率信息，也跟用户选的对不上。
+    is_top_row = bool(rows) and int((picked or {}).get("bitrate") or 0) >= int(rows[0]["bitrate"])
+    actual_label = f"原画（{quality_name}）" if is_top_row and "原画" not in quality_name else quality_name
     result.update({
         "record_url": chosen["url"],
         "flv_url": chosen["url"] if chosen["format"] == "flv" else "",
         "m3u8_url": chosen["url"] if chosen["format"] == "hls" else "",
         "lines": [c["url"] for c in ordered[:4]],
-        "quality_actual": canonical,
+        "quality_actual": actual_label or canonical,
         "quality_note": note,
         "cdn": chosen["cdn"],
         "format": chosen["format"],

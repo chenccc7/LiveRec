@@ -893,6 +893,8 @@ function syncSegInput(room) {
 
 function openAdd(room) {
   S.editing = room || null;
+  // 上一次识别留下的「实际画质」不能带到这一间，否则保存时会把它写进 URL_config
+  S.previewQualityActual = '';
   fillSelects();
   qualitySeq++;
   setQualityOptions(null, '');

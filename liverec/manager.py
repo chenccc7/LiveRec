@@ -175,10 +175,15 @@ class Manager:
         room = self.meta.get(rid)
         if not room:
             raise KeyError(rid)
+        old_quality = str(room.get("quality") or "").strip()
         for key in ("quality", "danmaku", "enabled", "anchor", "url", "unattended",
                     "splitMode", "splitSeconds", "qualityActual"):
             if key in patch and patch[key] is not None:
                 room[key] = bool(patch[key]) if key == "unattended" else patch[key]
+        # 换了画质：上一次解析出的「实际档位」就作废了，等这一轮录起来再回填。
+        # 不然 URL_config.ini 会一直写着改之前那档（编辑保存后画质不生效就是这个）。
+        if str(room.get("quality") or "").strip() != old_quality:
+            room["qualityActual"] = str(patch.get("qualityActual") or "").strip()
         task = self.tasks.get(rid)
         if task:
             if "quality" in patch and patch["quality"]:
