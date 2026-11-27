@@ -126,6 +126,9 @@ class RecordTask:
         self._shard_lock = threading.Lock()
         self._shard_dur: dict[str, float] = {}
         self.size = 0
+        # 已经收工的那几段一共多少字节：之后重连时 size 从它接着往上加，
+        # 卡片上的「文件大小」才是整场累计（不是只剩当前这一段）。
+        self._base_bytes = 0
         self.size_text = "0 B"
         self.bitrate = ""
         self.resolution = ""
@@ -792,6 +795,9 @@ class RecordTask:
             chunk_bytes = self.size - self._base_bytes
             # 这一段已经落盘（哪怕是被 CDN 掐断的），记下来供收尾时拼接
             if chunk_bytes > 0:
+                # 把这一段的字节并进累计基准：下一次重连（B站 HLS 断流、斗鱼换线）时
+                # 卡片上的「文件大小」要接着往上走，而不是只剩当前这一段的体积。
+                self._base_bytes = self.size
                 if not shard_mode:
                     # 分片模式下每片本身就是成品文件，不进「待拼接」清单
                     self._remember_part()
