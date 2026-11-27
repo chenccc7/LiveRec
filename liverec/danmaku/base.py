@@ -121,7 +121,7 @@ class DanmakuSession:
 
     def __init__(self, client, platform: str, room_key: str, anchor: str,
                  video_dir: str, room_id: str, on_event: Callable[[dict], None],
-                 danmaku_dir: str = ""):
+                 danmaku_dir: str = "", segment_seconds: int = 0):
         self.client = client
         self.platform = platform
         self.room_key = room_key
@@ -142,17 +142,40 @@ class DanmakuSession:
             folder = os.path.join(video_dir, "danmaku")
         else:
             folder = os.path.join(paths.danmaku_dir(), platform, _safe_name(anchor))
-        self.jsonl_path = os.path.join(folder, f"{self.session_id}.jsonl")
+        self._folder = folder
+        # 弹幕跟着视频分段：每过「分段时长」就换一个 jsonl，
+        # 这样一场直播的弹幕和同一场的 N 个视频文件一一对应。
+        self.segment_seconds = max(0, int(segment_seconds or 0))
+        self.seg_index = 0
+        self.jsonl_parts: list[str] = []
+        self.jsonl_path = self._part_path(0)
         self.count = 0
         self.status = "connecting"
         self._t0 = time.time()
         self._task = None
+
+    def _part_path(self, index: int) -> str:
+        """第 index 段的弹幕文件路径。"""
+        if self.segment_seconds <= 0:
+            return os.path.join(self._folder, f"{self.session_id}.jsonl")
+        return os.path.join(self._folder, f"{self.session_id}_part{index:03d}.jsonl")
+
+    def _rotate(self, index: int) -> None:
+        """切到第 index 段：换文件、记日志。"""
+        path = self._part_path(index)
+        if path == self.jsonl_path:
+            return
+        self.seg_index = index
+        self.jsonl_path = path
+        os.makedirs(self._folder, exist_ok=True)
+        log("INFO", f"[弹幕] {self.anchor} 第 {index + 1} 段的弹幕另存：{os.path.basename(path)}")
 
     # ---------- 生命周期 ----------
     async def start(self) -> None:
         import asyncio
 
         os.makedirs(os.path.dirname(self.jsonl_path), exist_ok=True)
+        self.jsonl_parts = [self.jsonl_path]
         STORE.start_session(self.session_id, self.platform, self.room_key,
                             self.anchor, self.jsonl_path, self.video_dir)
         self.status = "live"
@@ -192,7 +215,11 @@ class DanmakuSession:
                 pass
             self._task = None
         STORE.end_session(self.session_id, self.count)
-        log("INFO", f"[弹幕] {self.anchor} 已停止，本次共 {self.count} 条 → {self.jsonl_path}")
+        if len(self.jsonl_parts) > 1:
+            log("INFO", f"[弹幕] {self.anchor} 已停止，本次共 {self.count} 条，"
+                        f"{len(self.jsonl_parts)} 个分文件 → {os.path.dirname(self.jsonl_path)}")
+        else:
+            log("INFO", f"[弹幕] {self.anchor} 已停止，本次共 {self.count} 条 → {self.jsonl_path}")
 
     # ---------- 事件 ----------
     def emit(self, evt: dict[str, Any]) -> None:
@@ -212,6 +239,12 @@ class DanmakuSession:
             "gift_count": int(evt.get("gift_count") or 0),
             "repeat": int(evt.get("repeat") or 0),
         }
+        # 到了下一段就换文件：offset_ms 是从这场开录算起的，除以分段时长就是段号
+        if self.segment_seconds > 0:
+            index = int(row["offset_ms"] // (self.segment_seconds * 1000))
+            if index != self.seg_index:
+                self._rotate(index)
+                self.jsonl_parts.append(self.jsonl_path)
         self.count += 1
         try:
             with open(self.jsonl_path, "a", encoding="utf-8") as fh:

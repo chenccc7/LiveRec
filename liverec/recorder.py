@@ -1662,6 +1662,7 @@ class RecordTask:
                 client, self.platform, self.url, self.anchor or self.url,
                 video_dir, self.room_id, self._on_danmaku,
                 danmaku_dir=self.cfg.danmaku_root(),
+                segment_seconds=int(getattr(self, "_split_time", 0) or 0),
             )
             self.session_id = self._dm_session.session_id
             await self._dm_session.start()
